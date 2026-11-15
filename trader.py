@@ -15,6 +15,8 @@ import ssl
 import urllib.parse
 
 BASE = 'https://openapivts.koreainvestment.com:29443'
+REAL_BASE = 'https://openapi.koreainvestment.com:9443'
+HISTORY_PATH = '/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice'
 QUOTE = '/uapi/domestic-stock/v1/quotations/inquire-price'
 ORDER = '/uapi/domestic-stock/v1/trading/order-cash'
 FILLS = '/uapi/domestic-stock/v1/trading/inquire-daily-ccld'
@@ -48,8 +50,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def transport(path, headers, payload, post):
-    url = BASE + path
+def transport(path, headers, payload, post, *, base=BASE):
+    if base != BASE and not (base == REAL_BASE and path == HISTORY_PATH and not post):
+        raise TradingError('REAL_ROUTE_BLOCKED')
+    url = base + path
     body = None
     if post:
         body = json.dumps(payload).encode()
@@ -92,22 +96,24 @@ def integer(value, label, minimum=1):
 
 
 class SharedToken:
-    def __init__(self, home):
+    def __init__(self, home, environment='demo'):
+        if environment not in ('demo','real'):raise TradingError('INVALID_TOKEN_ENV')
         self.home = Path(home)
+        self.environment = environment
 
     def read(self):
         try:
             config = json.loads((self.home / 'kis_config.json').read_text(encoding='utf-8-sig'))
-            profile = config['profiles']['demo']
+            profile = config['profiles'][self.environment]
             key, secret = profile['app_key'], profile['app_secret']
-            if os.environ.get('KIS_ENV') == 'demo':
+            if os.environ.get('KIS_ENV','real') == self.environment:
                 pair = (os.environ.get('KIS_APP_KEY'), os.environ.get('KIS_APP_SECRET'))
                 if any(pair):
                     key, secret = pair
             if not all(isinstance(v, str) and re.fullmatch(r'[!-~]+', v) for v in (key, secret)):
                 raise ValueError()
-            binding = hashlib.sha256(('demo\0' + key + '\0' + secret).encode()).hexdigest()
-            cached = json.loads((self.home / 'kis_token_demo.json').read_text(encoding='utf-8'))
+            binding = hashlib.sha256((self.environment + '\0' + key + '\0' + secret).encode()).hexdigest()
+            cached = json.loads((self.home / ('kis_token_' + self.environment + '.json')).read_text(encoding='utf-8'))
             expiry = float(cached['expires'])
             token = cached['token']
             if cached['binding'] != binding or not math.isfinite(expiry) or expiry <= time.time() + 120:
@@ -116,7 +122,30 @@ class SharedToken:
                 raise ValueError()
             return key, secret, token
         except Exception:
-            raise TradingError('SHARED_DEMO_TOKEN_UNAVAILABLE: 기존 domino에서 demo 토큰을 갱신하세요.') from None
+            raise TradingError('SHARED_' + self.environment.upper() + '_TOKEN_UNAVAILABLE: 기존 domino의 ' + self.environment + ' 조회 토큰을 확인하세요.') from None
+
+
+class ReadOnlyHistoryClient:
+    """Existing real cache is permitted only for this one historical GET endpoint."""
+    def __init__(self, home, send=None, interval=0.2):
+        self.tokens=SharedToken(home,'real')
+        self.send=send
+        self.interval=interval
+        self.last=0
+
+    def request(self,path,tr_id,payload,post=False):
+        if path!=HISTORY_PATH or tr_id!='FHKST03010230' or post:
+            raise TradingError('READ_ONLY_HISTORY_ROUTE_BLOCKED')
+        key,secret,token=self.tokens.read()
+        headers={'Content-Type':'application/json; charset=utf-8','authorization':'Bearer '+token,
+            'appkey':key,'appsecret':secret,'tr_id':tr_id,'custtype':'P'}
+        time.sleep(max(0,self.interval-(time.monotonic()-self.last)))
+        try:
+            data=(self.send(path,headers,payload,False) if self.send else transport(path,headers,payload,False,base=REAL_BASE))
+        finally:self.last=time.monotonic()
+        if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':
+            raise TradingError('HISTORY_QUERY_REJECTED / CODE='+safe_code(data))
+        return data
 
 
 class DemoClient:

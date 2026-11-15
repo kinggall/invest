@@ -71,15 +71,27 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(old['symbol'],'005930')
         self.assertFalse(restarted.enabled)
 
-    def test_daily_chart_is_read_only_and_does_not_change_strategy(self):
+    def test_historical_chart_is_read_only_and_does_not_change_strategy(self):
         before=self.app.strategy()
-        bars=[dict(time='2026-11-13',end='2026-11-13',open=100,high=110,low=90,close=105,volume=1000)]
-        with patch.object(self.app,'engine') as factory:
-            factory.return_value.market.daily.return_value=bars
-            self.app.action('daily',{'date':'2026-11-13'})
+        with patch.object(self.app,'engine') as factory, patch.object(d,'History') as reader:
+            reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
+            self.app.action('historical',{'date':'2026-11-13'})
             factory.return_value.client.order.assert_not_called()
             factory.return_value.evaluate.assert_not_called()
-        self.assertEqual(self.app.history['last_date'],'2026-11-13')
+        self.assertEqual(self.app.history['cutoff'],'2026-11-13')
+        self.assertEqual(self.app.strategy(),before)
+        self.assertFalse(self.app.enabled)
+
+    def test_backtest_never_calls_live_evaluation_or_order(self):
+        before=self.app.strategy()
+        with patch.object(self.app,'engine') as factory, patch.object(d,'History') as reader, patch.object(d,'simulate') as simulator:
+            reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
+            simulator.return_value={'net_pnl':123,'date':'2026-11-13'}
+            self.app.action('backtest',{'date':'2026-11-13','capital':10000000})
+            factory.return_value.client.order.assert_not_called()
+            factory.return_value.evaluate.assert_not_called()
+            self.assertEqual(simulator.call_args.kwargs['initial'],10000000)
+        self.assertEqual(self.app.backtest['net_pnl'],123)
         self.assertEqual(self.app.strategy(),before)
         self.assertFalse(self.app.enabled)
 

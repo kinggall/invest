@@ -15,6 +15,8 @@ import webbrowser
 from trader import DemoClient, SharedToken, TradingError, KST
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from signals import macd
+from history import History
+from backtest import simulate
 
 
 class Dashboard:
@@ -28,6 +30,7 @@ class Dashboard:
         self.last_check = None
         self.snapshot = None
         self.history = None
+        self.backtest = None
         self.last_refresh = 0
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
@@ -79,7 +82,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history,
+            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest,
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
@@ -103,15 +106,19 @@ class Dashboard:
                 with self.db() as db:
                     db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(strategy),))
                 self.last_message = '전략 저장됨'
-            elif command == 'daily':
+            elif command in ('historical','backtest'):
                 cutoff=value.get('date')
+                self.backtest=None
                 cfg=validate(self.strategy())
                 engine=self.engine()
                 try:
-                    bars=engine.market.daily(SYMBOL,cutoff)
-                    self.history=dict(cutoff=cutoff,last_date=bars[-1]['time'],symbol=SYMBOL,
-                        chart=macd(bars,cfg['fast'],cfg['slow'],cfg['signal']),adjusted=True,
-                        periods=[cfg['fast'],cfg['slow'],cfg['signal']],observed_at=datetime.now(KST).isoformat())
+                    loaded=History(engine).load(cutoff,cfg)
+                    self.history=loaded
+                    if command=='backtest':
+                        self.backtest=simulate(loaded,initial=value.get('capital',10000000),
+                            fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
+                            tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
+                            force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
                 finally:
                     engine.db.close()
             elif command == 'preview':
