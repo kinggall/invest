@@ -104,3 +104,17 @@ python -m unittest discover -s tests -v
 - `kinggall/domino` 커밋 `33c9b55a934f78c4920e09b8dff3d50d70392df3`: `domino_kis.py`, `docs/KIS.md`.
 - `koreainvestment/open-trading-api` 커밋 `4a51f9126e719c352072b14b7df9222cb2691720`: `examples_llm/domestic_stock/order_cash/order_cash.py`, `inquire_daily_ccld/inquire_daily_ccld.py`.
 - 모의 TR: 매수 `VTTC0012U`, 매도 `VTTC0011U`, 최근 체결조회 `VTTC0081R`.
+
+### 주문 접수 상태가 불명확할 때
+
+`REQUEST_UNCERTAIN`은 주문 성공·실패를 확정할 수 없는 상태입니다. 자동 실행을 중지한 채 한투 모의 주문내역에서 실제 접수 여부를 먼저 확인하세요. 전략 ID 변경이나 DB 삭제로 재주문하지 마세요. 기존 UNKNOWN은 업데이트 후에도 유지됩니다.
+
+진단은 주문·토큰 발급 없이 모의 시세와 모의 주문내역 조회만 수행합니다:
+
+```powershell
+Set-Location "$env:USERPROFILE\projects\invest"
+git pull --ff-only
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1 -Diagnose
+```
+
+진단 출력에는 단계, HTTP 상태, 검증된 한투 오류 코드만 포함합니다. 키·토큰·계좌번호·서버 원문 메시지는 출력하지 않습니다. HTTP 500을 포함한 주문 오류도 자동 재시도하지 않습니다. 기존 오류의 상세 원인은 소급해 복원할 수 없으며, 조회 진단이 주문 권한·주문시간·주문 필드의 유효성까지 보장하지는 않습니다. 기록일이 주말·휴장일이면 시세 조회가 성공해도 주문은 제한될 수 있습니다.

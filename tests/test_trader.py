@@ -115,4 +115,29 @@ class TradingTests(unittest.TestCase):
         self.client.send=pages
         self.assertEqual(self.engine.sync()[0]['status'],'SUBMITTED')
 
+
+class DiagnosticTests(unittest.TestCase):
+    def test_http_status_and_code_exclude_secret_response(self):
+        import io
+        import urllib.error
+        from unittest.mock import patch
+        raw = io.BytesIO(json.dumps({'msg_cd':'EGW00123','msg1':'private-secret'}).encode())
+        failure = urllib.error.HTTPError('https://private-secret.invalid',500,'private-secret',None,raw)
+        with patch.object(t.urllib.request,'build_opener') as opener:
+            opener.return_value.open.side_effect = failure
+            with self.assertRaises(t.RequestFailure) as caught:
+                t.transport(t.ORDER,{}, {},True)
+        self.assertEqual(str(caught.exception),'HTTP HTTP=500 CODE=EGW00123')
+        self.assertNotIn('private-secret',str(caught.exception))
+
+    def test_timeout_does_not_echo_exception(self):
+        from unittest.mock import patch
+        with patch.object(t.urllib.request,'build_opener') as opener:
+            opener.return_value.open.side_effect=TimeoutError('private-secret')
+            with self.assertRaisesRegex(t.RequestFailure,'^TIMEOUT$'):
+                t.transport(t.ORDER,{}, {},True)
+
+    def test_invalid_codes_are_not_displayed(self):
+        self.assertEqual(t.safe_code({'msg_cd':'private-secret'}),'')
+
 if __name__=='__main__':unittest.main()

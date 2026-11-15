@@ -10,6 +10,8 @@ import re
 import sqlite3
 import time
 import urllib.request
+import urllib.error
+import ssl
 import urllib.parse
 
 BASE = 'https://openapivts.koreainvestment.com:29443'
@@ -21,6 +23,24 @@ KST = timezone(timedelta(hours=9))
 
 class TradingError(Exception):
     pass
+
+
+class RequestFailure(TradingError):
+    """Only internally controlled stage names and validated KIS codes."""
+    def __init__(self, stage, status=None, code=''):
+        self.stage = stage if stage in ('HTTP', 'TLS', 'TIMEOUT', 'CONNECTION', 'RESPONSE') else 'RESPONSE'
+        self.status = status if isinstance(status, int) and 100 <= status <= 599 else None
+        self.code = safe_code({'msg_cd': code})
+        super().__init__(self.stage + (' HTTP=' + str(self.status) if self.status else '') + (' CODE=' + self.code if self.code else ''))
+
+
+def safe_code(data):
+    if isinstance(data, dict):
+        for key in ('msg_cd', 'error_code'):
+            value = data.get(key)
+            if isinstance(value, str) and re.fullmatch(r'[A-Z]{2,8}[0-9]{3,8}', value):
+                return value
+    return ''
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -45,10 +65,24 @@ def transport(path, headers, payload, post):
         if not isinstance(data, dict):
             raise TradingError('RESPONSE_INVALID')
         return data
+    except urllib.error.HTTPError as exc:
+        code = ''
+        try:
+            code = safe_code(json.loads(exc.read(65536)))
+        except Exception:
+            pass
+        finally:
+            exc.close()
+        raise RequestFailure('HTTP', exc.code, code) from None
+    except urllib.error.URLError as exc:
+        stage = 'TLS' if isinstance(exc.reason, ssl.SSLCertVerificationError) else ('TIMEOUT' if isinstance(exc.reason, TimeoutError) else 'CONNECTION')
+        raise RequestFailure(stage) from None
+    except TimeoutError:
+        raise RequestFailure('TIMEOUT') from None
     except TradingError:
-        raise
+        raise RequestFailure('RESPONSE') from None
     except Exception:
-        raise TradingError('NETWORK_OR_RESPONSE_ERROR') from None
+        raise RequestFailure('RESPONSE') from None
 
 
 def integer(value, label, minimum=1):
@@ -105,13 +139,18 @@ class DemoClient:
         time.sleep(max(0, self.interval - (time.monotonic() - self.last)))
         try:
             data = self.send(path, headers, payload, post)
+        except RequestFailure as exc:
+            prefix = 'REQUEST_UNCERTAIN' if post else 'QUERY_FAILED'
+            raise TradingError(prefix + ' / ' + str(exc)) from None
         except Exception:
             raise TradingError('REQUEST_UNCERTAIN' if post else 'QUERY_FAILED') from None
         finally:
             self.last = time.monotonic()
         if not isinstance(data, dict) or str(data.get('rt_cd')) != '0':
             # Even a negative response is not automatically safe to resubmit.
-            raise TradingError('ORDER_REQUIRES_RECONCILIATION' if post else 'KIS_QUERY_REJECTED')
+            prefix = 'ORDER_REQUIRES_RECONCILIATION' if post else 'KIS_QUERY_REJECTED'
+            code = safe_code(data)
+            raise TradingError(prefix + (' / CODE=' + code if code else ''))
         return data
 
     def quote(self, symbol):
@@ -234,6 +273,7 @@ def main():
     run.add_argument('strategy', type=Path)
     run.add_argument('--execute-demo', action='store_true')
     sub.add_parser('sync')
+    sub.add_parser('diagnose')
     rec = sub.add_parser('reconcile')
     rec.add_argument('--strategy-id', required=True)
     rec.add_argument('--day', required=True)
@@ -242,6 +282,16 @@ def main():
     args = parser.parse_args()
     try:
         client = DemoClient(args.domino_home, os.environ.get('KIS_DEMO_CANO', ''), os.environ.get('KIS_DEMO_PRODUCT', '01'))
+        if args.command == 'diagnose':
+            client.quote('005930')
+            print('모의 시세 조회 성공')
+            day = datetime.now(KST).strftime('%Y%m%d')
+            client.request(FILLS, 'VTTC0081R', dict(client.account, INQR_STRT_DT=day,
+                INQR_END_DT=day, SLL_BUY_DVSN_CD='00', PDNO='', CCLD_DVSN='00',
+                INQR_DVSN='00', INQR_DVSN_3='00', ORD_GNO_BRNO='', ODNO='',
+                INQR_DVSN_1='', CTX_AREA_FK100='', CTX_AREA_NK100=''))
+            print('모의 주문내역 조회 성공 · 주문 전송 및 토큰 발급 없음')
+            return 0
         engine = Engine(args.state, client)
         if args.command == 'run':
             result = engine.run(json.loads(args.strategy.read_text(encoding='utf-8-sig')), args.execute_demo)
