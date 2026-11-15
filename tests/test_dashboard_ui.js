@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('strategyForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type=match[0].match(/type="([^"]+)"/)?.[1]||'text';field.checked=false;fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-vwap2',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
+let status={api_version:'2026-11-compare3',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
 const requests=[];class FormDataMock {constructor(form){this.entries=[...form.elements].filter(e=>e.type!=='checkbox'||e.checked).map(e=>[e.name,e.value])}[Symbol.iterator](){return this.entries[Symbol.iterator]()}}
 const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0,console,fetch:async(url,options)=>{
  if(options?.body)requests.push(JSON.parse(options.body));
@@ -52,6 +52,19 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  elements.get('strategyForm').listeners.submit({preventDefault(){}});
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(requests.at(-1).vwap_filter,false);
+ const base=status.backtest;
+ const variants=Object.fromEntries(['baseline','vwap','vwap_hold','swing_hold','buy_hold'].map((key,index)=>[key,{...base,strategy:key,final_equity:10000000+index*10000,net_pnl:index*10000,reference_price_pnl:index*10000+3000,total_cost:3000,slippage_cost:0,tax:0,macd_exits_held:2,orders:[{time:point.time,side:'buy',price:15010,reference_open:15000,reason:'검증 매수'}],assumptions:{...base.assumptions,exit_policy:key==='vwap_hold'?'vwap':key==='swing_hold'?'swing':'macd',trend_exit:'확정봉 후 다음 봉 청산'}}]));
+ const comparison={selected:'vwap_hold'};for(const [key,run] of Object.entries(variants))comparison[key]={net_pnl:run.net_pnl,reference_price_pnl:run.reference_price_pnl,total_cost:run.total_cost,return_pct:run.return_pct,buy_count:run.buy_count,max_drawdown_pct:run.max_drawdown_pct,ending_shares:0};
+ status={...status,backtest:{...variants.vwap_hold,variants,comparison,run_id:'five-strategy-run'}};
+ await vm.runInContext('refresh()',context);
+ assert.equal(elements.get('btComparison').children.length,5);
+ assert.match(elements.get('btHeading').textContent,/VWAP 청산/);
+ assert.match(elements.get('btCosts').textContent,/슬리피지/);
+ assert.ok(elements.get('historyCandles').children.some(n=>n.attrs.points&&n.attrs.fill==='#b6473a'));
+ const beforeSwitch=requests.length;
+ elements.get('btStrategy').value='buy_hold';elements.get('btStrategy').listeners.change();
+ assert.match(elements.get('btHeading').textContent,/단순보유/);
+ assert.equal(requests.length,beforeSwitch);
  const partial={...point,vwap:null,vwap_observed:14999,vwap_quality:'partial',vwap_missing_minutes:1,vwap_missing_times:['09:04']};
  status={...status,history:{...status.history,chart:[partial]}};
  await vm.runInContext('refresh()',context);
@@ -65,7 +78,7 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  const before=requests.length;
  await vm.runInContext("action('backtest',{date:'2026-11-13'})",context);
  assert.equal(requests.length,before);
- status={...status,api_version:'2026-11-vwap2',restart_required:true};
+ status={...status,api_version:'2026-11-compare3',restart_required:true};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('historyFeedback').textContent,/업데이트한 Python/);
  console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards passed.');

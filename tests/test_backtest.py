@@ -90,3 +90,77 @@ class BacktestTests(unittest.TestCase):
         result=simulate(data,1000,0,0,vwap_filter=True)
         self.assertEqual(result['sell_count'],1)
         self.assertEqual(result['net_pnl'],500)
+
+class TrendExitTests(unittest.TestCase):
+    def history(self,prices,lows=None,crosses=None,refs=None):
+        start=datetime(2026,11,11,9,tzinfo=KST)
+        rows=[]
+        for index,price in enumerate(prices):
+            stamp=start+timedelta(minutes=3*index)
+            rows.append(dict(time=stamp.isoformat(),end=(stamp+timedelta(minutes=3)).isoformat(),
+                open=price,high=price+1,low=lows[index] if lows else price-1,close=price,volume=100,
+                macd=1,signal=0,cross=(crosses or {}).get(index),
+                vwap=refs[index] if refs else 90+index,vwap_change=1 if index else None))
+        return dict(cutoff='2026-11-11',chart=rows,missing_bars=[],warmup_date='2026-11-10')
+
+    def test_vwap_trend_holds_macd_exit_and_sells_after_closed_break(self):
+        data=self.history([100,110,120,115,130,105,110],crosses={0:'buy',2:'sell'},refs=[90,95,100,101,102,110,109])
+        old=simulate(data,1000,0,0,vwap_filter=True)
+        trend=simulate(data,1000,0,0,exit_policy='vwap')
+        self.assertEqual(old['trades'][0]['exit'],data['chart'][3]['time'])
+        self.assertEqual(trend['trades'][0]['exit'],data['chart'][6]['time'])
+        self.assertEqual(trend['trades'][0]['reason'],'VWAP 종가 이탈')
+        self.assertEqual(trend['macd_exits_held'],1)
+        self.assertEqual(trend['trades'][0]['trigger_level'],110)
+
+    def test_non_rising_vwap_does_not_protect_macd_exit(self):
+        data=self.history([100,110,120,115,130],crosses={0:'buy',2:'sell'})
+        data['chart'][2]['vwap_change']=0
+        run=simulate(data,1000,0,0,exit_policy='vwap')
+        self.assertEqual(run['trades'][0]['exit'],data['chart'][3]['time'])
+        self.assertIn('조건 미충족',run['trades'][0]['reason'])
+
+    def test_confirmed_swing_stop_is_trailing_and_not_lowered(self):
+        data=self.history([105,110,115,112,120,104,110,102,101],
+            lows=[100,101,105,103,106,101,102,100,99],crosses={0:'buy',2:'sell'})
+        run=simulate(data,1000,0,0,exit_policy='swing')
+        self.assertEqual(run['trades'][0]['exit'],data['chart'][8]['time'])
+        self.assertEqual(run['trades'][0]['trigger_level'],103)
+        self.assertEqual(run['trades'][0]['reason'],'확인된 눌림 저점 이탈')
+        self.assertEqual(run['macd_exits_held'],1)
+        prefix=dict(data,chart=data['chart'][:5])
+        earlier=simulate(prefix,1000,0,0,exit_policy='swing')
+        self.assertEqual(earlier['orders'],run['orders'][:1])
+
+    def test_missing_vwap_cannot_silently_protect_exit(self):
+        data=self.history([100,110,120,115],crosses={0:'buy',2:'sell'})
+        data['chart'][2]['vwap']=None
+        run=simulate(data,1000,0,0,exit_policy='vwap')
+        self.assertEqual(run['sell_count'],1)
+        self.assertGreater(run['vwap_exit_unavailable_bars'],0)
+
+    def test_buy_hold_enters_at_first_open_and_obeys_same_forced_exit(self):
+        data=self.history([100,110,120,150])
+        for bar in data['chart']:bar['signal']=None
+        data['chart'][-1].update(time='2026-11-11T15:15:00+09:00',end='2026-11-11T15:18:00+09:00')
+        run=simulate(data,1000,0,0,benchmark=True,force_close=True)
+        self.assertEqual(run['buy_count'],1)
+        self.assertEqual(run['sell_count'],1)
+        self.assertEqual(run['orders'][0]['time'],data['chart'][0]['time'])
+        self.assertEqual(run['orders'][0]['signal_time'],None)
+        self.assertEqual(run['trades'][0]['reason'],'15:15 시간청산')
+        self.assertEqual(run['net_pnl'],500)
+
+    def test_screenshot_trade_cost_decomposition_is_reconciled(self):
+        rows=[(14715,14800),(14895,14910),(14970,14960),(15055,15030),(15110,15065),(15110,15070),(15120,15045)]
+        prices=[];crosses={}
+        for buy,sell in rows:
+            index=len(prices);prices.extend([buy-10,buy-10,sell+10,sell+10])
+            crosses[index]='buy';crosses[index+2]='sell'
+        result=simulate(self.history(prices,crosses=crosses))
+        self.assertEqual(result['net_pnl'],-82298)
+        self.assertEqual(result['fees'],21028)
+        self.assertEqual(result['slippage_cost'],93500)
+        self.assertEqual(result['reference_price_pnl'],32230)
+        self.assertEqual(result['total_cost'],114528)
+        self.assertEqual(result['reference_price_pnl']-result['total_cost'],result['net_pnl'])

@@ -96,7 +96,7 @@ class DashboardTests(unittest.TestCase):
             factory.return_value.client.order.assert_not_called()
             factory.return_value.evaluate.assert_not_called()
             self.assertEqual(simulator.call_args.kwargs['initial'],10000000)
-            self.assertEqual([call.kwargs['vwap_filter'] for call in simulator.call_args_list],[False,True])
+            self.assertEqual([call.kwargs.get('vwap_filter',False) for call in simulator.call_args_list],[False,True,True,True,False])
             self.assertEqual(self.app.backtest['comparison']['selected'],'baseline')
         self.assertEqual(self.app.backtest['net_pnl'],123)
         self.assertEqual(self.app.strategy(),before)
@@ -161,7 +161,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-vwap2')
+        self.assertEqual(status['api_version'],'2026-11-compare3')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

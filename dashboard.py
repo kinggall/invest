@@ -17,10 +17,10 @@ from trader import DemoClient, SharedToken, TradingError, KST
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from signals import macd
 from history import History
-from backtest import simulate
+from backtest import simulate, STRATEGIES
 
 
-API_VERSION = '2026-11-vwap2'
+API_VERSION = '2026-11-compare3'
 
 
 def source_fingerprint():
@@ -162,14 +162,20 @@ class Dashboard:
                             fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
                             tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
                             force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
-                        selected=value.get('vwap_filter',False)
-                        if not isinstance(selected,bool):raise TradingError('INVALID_VWAP_FILTER')
-                        baseline=simulate(loaded,**options,vwap_filter=False)
-                        filtered=simulate(loaded,**options,vwap_filter=True)
-                        keys=('net_pnl','return_pct','max_drawdown_pct','buy_count','sell_count','round_trips','fees','vwap_filtered_signals','vwap_unavailable_signals')
-                        comparison=dict(baseline={k:baseline.get(k) for k in keys},
-                            vwap={k:filtered.get(k) for k in keys},selected='vwap' if selected else 'baseline')
-                        result=dict(filtered if selected else baseline,comparison=comparison)
+                        selected=value.get('strategy')
+                        if selected is None:
+                            legacy=value.get('vwap_filter',False)
+                            if not isinstance(legacy,bool):raise TradingError('INVALID_VWAP_FILTER')
+                            selected='vwap' if legacy else 'baseline'
+                        if selected not in STRATEGIES:raise TradingError('INVALID_BACKTEST_STRATEGY')
+                        variants={}
+                        for number,(key,(label,rules)) in enumerate(STRATEGIES.items(),1):
+                            self.progress(job_id,str(number)+'/5 · '+label+' 계산 중…')
+                            variants[key]=simulate(loaded,**options,**rules)
+                        keys=('reference_price_pnl','total_cost','net_pnl','return_pct','max_drawdown_pct','buy_count','sell_count','round_trips','fees','tax','slippage_cost','vwap_filtered_signals','vwap_unavailable_signals','vwap_exit_unavailable_bars','macd_exits_held','ending_shares')
+                        comparison={key:{field:run.get(field) for field in keys} for key,run in variants.items()}
+                        comparison['selected']=selected
+                        result=dict(variants[selected],comparison=comparison,variants=variants,run_id=job_id)
                         with self.lock:
                             self.backtest=result
                 message={'preview':'지표·수급 조회 완료','sync':'체결 조회 완료','backtest':'백테스트 계산 완료','historical':'과거 3분봉 조회 완료'}[command]
