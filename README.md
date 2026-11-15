@@ -14,9 +14,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\projects\i
 
 브라우저에서 **http://127.0.0.1:8766**이 열립니다. ExecutionPolicy 옵션은 이 프로세스에만 적용하며 PC의 정책을 변경하지 않습니다.
 
-실행 스크립트는 기존 `DOMINO_HOME`을 우선 사용합니다. 미설정이면 사용자 `projects/domino-code` 및 `C:/domino`에 `kis_config.json`이 있는지 확인합니다. 찾지 못하면 **기존 설정·토큰이 저장된 데이터 폴더**를 PC에서 입력받습니다. 기존 코드가 있는 폴더와 데이터 폴더는 다를 수 있습니다. 키나 토큰 문자열을 입력하는 절차가 아닙니다.
+실행 스크립트는 명시한 `-DominoHome`, 기존 `DOMINO_HOME`, 저장된 데이터 폴더 순으로 선택합니다. 모두 미설정이면 사용자 `projects/domino-code` 및 `C:/domino`에 `kis_config.json`이 있는지 확인합니다. 찾지 못하면 **기존 설정·토큰이 저장된 데이터 폴더**를 PC에서 입력받습니다. 기존 코드가 있는 폴더와 데이터 폴더는 다를 수 있습니다. 키나 토큰 문자열을 입력하는 절차가 아닙니다.
 
-모의계좌 번호는 PC에서 하이픈 없는 8자리를 입력합니다. 상품코드는 `01`이 기본값입니다. 다른 상품코드가 필요하면 실행 전에 `$env:KIS_DEMO_PRODUCT`에 지정하세요. 계좌·키·토큰을 채팅이나 GitHub에 올리지 마세요.
+모의계좌 번호는 최초 실행 시 PC에서 하이픈 없는 8자리를 입력합니다. 데이터 폴더·모의계좌 번호·상품코드는 `%LOCALAPPDATA%/invest/settings.json`에 저장하며 다음 실행과 진단에서 자동 재사용합니다. 이 파일은 Git 저장소 밖에 있으며 키·시크릿·토큰은 저장하지 않습니다. 상품코드는 `01`이 기본값입니다. 다른 상품코드가 필요하면 실행 전에 `$env:KIS_DEMO_PRODUCT`에 지정하세요. 계좌·키·토큰을 채팅이나 GitHub에 올리지 마세요.
 
 데이터 폴더를 명시하려면:
 
@@ -118,3 +118,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1 -Diagn
 ```
 
 진단 출력에는 단계, HTTP 상태, 검증된 한투 오류 코드만 포함합니다. 키·토큰·계좌번호·서버 원문 메시지는 출력하지 않습니다. HTTP 500을 포함한 주문 오류도 자동 재시도하지 않습니다. 기존 오류의 상세 원인은 소급해 복원할 수 없으며, 조회 진단이 주문 권한·주문시간·주문 필드의 유효성까지 보장하지는 않습니다. 기록일이 주말·휴장일이면 시세 조회가 성공해도 주문은 제한될 수 있습니다.
+
+### 저장한 모의계좌 설정 변경
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\projects\invest\start-dashboard.ps1" -Reconfigure
+```
+
+이 옵션은 저장된 설정을 다시 입력받고 교체합니다. 데이터 폴더는 명시한 `-DominoHome`이나 기존 `DOMINO_HOME`이 없으면 입력받습니다. 계좌번호와 상품코드는 다시 입력받습니다. 일반 실행 및 `-Diagnose`는 저장된 설정을 재사용합니다. 명시한 계좌 환경변수는 저장된 값보다 우선하며 정상 검증 후 로컬 설정에 반영됩니다. 잘못된 입력은 기존 설정을 덮어쓰지 않습니다. 로컬 파일의 계좌번호는 평문이므로 다른 사람에게 공유하지 마세요. 기존 주문 DB와 토큰은 변경하지 않습니다.
