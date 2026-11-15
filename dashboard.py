@@ -24,6 +24,7 @@ class Dashboard:
         self.home, self.state = Path(home), Path(state)
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self.io_lock = threading.Lock()
         self.enabled = False
         self.shutdown = threading.Event()
         self.last_message = '중지됨'
@@ -31,6 +32,8 @@ class Dashboard:
         self.snapshot = None
         self.history = None
         self.backtest = None
+        self.lookup_job = dict(state='idle',command=None,message='조회할 거래일을 선택하세요.')
+        self.lookup_thread = None
         self.last_refresh = 0
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
@@ -82,20 +85,82 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest,
+            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
+        with self.lock:
+            cfg=self.strategy()
         engine = self.engine()
         try:
-            result = engine.evaluate(self.strategy(), execute)
-            self.snapshot = result
-            self.last_refresh = time.monotonic()
-            self.last_check = datetime.now(KST).isoformat(timespec='seconds')
-            self.last_message = json.dumps({key:result[key] for key in ('status','bars','required_bars','position','pending','submitted') if key in result}, ensure_ascii=False)
+            result = engine.evaluate(cfg, execute, allow_submit=self.may_submit if execute else None)
+            with self.lock:
+                self.snapshot = result
+                self.last_refresh = time.monotonic()
+                self.last_check = datetime.now(KST).isoformat(timespec='seconds')
+                self.last_message = json.dumps({key:result[key] for key in ('status','bars','required_bars','position','pending','submitted') if key in result}, ensure_ascii=False)
             return result
         finally:
             engine.db.close()
+
+    def may_submit(self):
+        # Read atomic state without holding a lock across SQLite / network work.
+        return self.enabled and not self.shutdown.is_set()
+
+    def progress(self, job_id, message):
+        with self.lock:
+            if self.lookup_job.get('id')==job_id:
+                self.lookup_job.update(message=message,updated_at=datetime.now(KST).isoformat(timespec='seconds'))
+
+    @staticmethod
+    def lookup_error(exc):
+        if isinstance(exc,TradingError):
+            code=str(exc)
+            if code.startswith('SHARED_REAL_TOKEN_UNAVAILABLE'):
+                return ('기존 domino의 실전 조회 토큰이 없거나 만료됐거나 키가 일치하지 않습니다. '
+                        '동일한 DOMINO_HOME에서 기존 domino_kis.py check --environment real로 연결을 확인하세요. '
+                        'invest는 토큰을 새로 발급하지 않습니다. [SHARED_REAL_TOKEN_UNAVAILABLE]')
+            return code
+        kind=type(exc).__name__
+        allowed={'KeyError','TypeError','ValueError','OperationalError','TimeoutError','AttributeError'}
+        return '조회 데이터 처리 오류 ['+(kind if kind in allowed else 'INTERNAL_ERROR')+']. 서버 버전과 응답 형식을 확인해야 합니다.'
+
+    def run_lookup(self, job_id, command, value, cfg):
+        engine=None
+        try:
+            with self.io_lock:
+                self.progress(job_id,'조회 연결 확인 중…')
+                if command=='preview':
+                    self.tick(False)
+                elif command=='sync':
+                    engine=self.engine()
+                    result=engine.sync()
+                    with self.lock:
+                        self.last_message=json.dumps(result,ensure_ascii=False)
+                        self.last_check=datetime.now(KST).isoformat(timespec='seconds')
+                else:
+                    engine=self.engine()
+                    loaded=History(engine,progress=lambda message:self.progress(job_id,message)).load(value.get('date'),cfg)
+                    with self.lock:
+                        self.history=loaded
+                    if command=='backtest':
+                        self.progress(job_id,'확정 3분봉으로 백테스트 계산 중…')
+                        result=simulate(loaded,initial=value.get('capital',10000000),
+                            fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
+                            tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
+                            force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
+                        with self.lock:
+                            self.backtest=result
+                message={'preview':'지표·수급 조회 완료','sync':'체결 조회 완료','backtest':'백테스트 계산 완료','historical':'과거 3분봉 조회 완료'}[command]
+                with self.lock:
+                    self.lookup_job.update(state='succeeded',message=message,finished_at=datetime.now(KST).isoformat(timespec='seconds'))
+        except Exception as exc:
+            message=self.lookup_error(exc)
+            with self.lock:
+                self.lookup_job.update(state='failed',message=message,finished_at=datetime.now(KST).isoformat(timespec='seconds'))
+        finally:
+            if engine is not None:
+                engine.db.close()
 
     def action(self, command, value):
         with self.lock:
@@ -106,23 +171,18 @@ class Dashboard:
                 with self.db() as db:
                     db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(strategy),))
                 self.last_message = '전략 저장됨'
-            elif command in ('historical','backtest'):
-                cutoff=value.get('date')
-                self.backtest=None
+            elif command in ('historical','backtest','preview','sync'):
+                if self.lookup_job['state']=='running':
+                    raise TradingError('조회가 진행 중입니다. 아래 진행 상태를 확인하세요.')
                 cfg=validate(self.strategy())
-                engine=self.engine()
-                try:
-                    loaded=History(engine).load(cutoff,cfg)
-                    self.history=loaded
-                    if command=='backtest':
-                        self.backtest=simulate(loaded,initial=value.get('capital',10000000),
-                            fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
-                            tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
-                            force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
-                finally:
-                    engine.db.close()
-            elif command == 'preview':
-                self.tick(False)
+                if command in ('historical','backtest'):
+                    self.history=None
+                    self.backtest=None
+                job_id=secrets.token_hex(8)
+                self.lookup_job=dict(id=job_id,state='running',command=command,date=value.get('date'),
+                    message='조회 대기 중…',started_at=datetime.now(KST).isoformat(timespec='seconds'))
+                self.lookup_thread=threading.Thread(target=self.run_lookup,args=(job_id,command,dict(value),cfg),daemon=True)
+                self.lookup_thread.start()
             elif command == 'start':
                 SharedToken(self.home).read()
                 self.client()
@@ -132,30 +192,26 @@ class Dashboard:
             elif command == 'stop':
                 self.enabled = False
                 self.last_message = '자동 실행 중지 · 기존 미체결 주문은 유지됩니다.'
-            elif command == 'sync':
-                engine = self.engine()
-                try:
-                    self.last_message = json.dumps(engine.sync(), ensure_ascii=False)
-                    self.last_check = datetime.now(KST).isoformat(timespec='seconds')
-                finally:
-                    engine.db.close()
             else:
                 raise TradingError('알 수 없는 요청')
 
     def worker(self):
         while not self.shutdown.wait(10):
             with self.lock:
-                if self.enabled or time.monotonic()-self.last_refresh >= 60:
-                    try:
-                        self.tick(self.enabled)
-                    except TradingError as exc:
-                        self.last_refresh = time.monotonic()
-                        self.enabled = False
-                        self.last_message = str(exc) + ' · 자동 실행 중지'
-                    except Exception:
-                        self.last_refresh = time.monotonic()
-                        self.enabled = False
-                        self.last_message = '처리 오류 · 자동 실행 중지'
+                execute=self.enabled
+                due=execute or time.monotonic()-self.last_refresh>=60
+                lookup_running=self.lookup_job['state']=='running'
+            if not due or lookup_running or not self.io_lock.acquire(blocking=False):
+                continue
+            try:
+                self.tick(execute)
+            except Exception as exc:
+                with self.lock:
+                    self.last_refresh=time.monotonic()
+                    self.enabled=False
+                    self.last_message=self.lookup_error(exc)+' · 자동 실행 중지'
+            finally:
+                self.io_lock.release()
 
 
 def handler_for(app):

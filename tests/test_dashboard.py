@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+from unittest.mock import Mock
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -76,6 +77,8 @@ class DashboardTests(unittest.TestCase):
         with patch.object(self.app,'engine') as factory, patch.object(d,'History') as reader:
             reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
             self.app.action('historical',{'date':'2026-11-13'})
+            self.app.lookup_thread.join(2)
+            self.assertFalse(self.app.lookup_thread.is_alive())
             factory.return_value.client.order.assert_not_called()
             factory.return_value.evaluate.assert_not_called()
         self.assertEqual(self.app.history['cutoff'],'2026-11-13')
@@ -88,6 +91,8 @@ class DashboardTests(unittest.TestCase):
             reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
             simulator.return_value={'net_pnl':123,'date':'2026-11-13'}
             self.app.action('backtest',{'date':'2026-11-13','capital':10000000})
+            self.app.lookup_thread.join(2)
+            self.assertFalse(self.app.lookup_thread.is_alive())
             factory.return_value.client.order.assert_not_called()
             factory.return_value.evaluate.assert_not_called()
             self.assertEqual(simulator.call_args.kwargs['initial'],10000000)
@@ -103,6 +108,53 @@ class DashboardTests(unittest.TestCase):
     def test_preview_does_not_execute_order(self):
         with patch.object(self.app,'tick',return_value={}) as tick:
             self.assertEqual(self.request('/api/preview',{})[0],200)
+            self.app.lookup_thread.join(2)
         tick.assert_called_once_with(False)
+
+    def test_slow_lookup_keeps_status_and_stop_responsive(self):
+        entered=threading.Event();release=threading.Event()
+        def slow(*args):
+            entered.set()
+            release.wait(3)
+            return {'cutoff':'2026-11-13','chart':[]}
+        with patch.object(self.app,'engine') as factory, patch.object(d,'History') as reader:
+            reader.return_value.load.side_effect=slow
+            try:
+                status,raw=self.request('/api/historical',{'date':'2026-11-13'})
+                self.assertEqual(status,200)
+                self.assertTrue(entered.wait(1))
+                data=json.loads(self.request('/api/status')[1])
+                self.assertEqual(data['lookup_job']['state'],'running')
+                self.assertEqual(self.request('/api/stop',{})[0],200)
+                self.assertEqual(self.request('/api/historical',{'date':'2026-11-13'})[0],400)
+            finally:
+                release.set();self.app.lookup_thread.join(2)
+        self.assertEqual(self.app.lookup_job['state'],'succeeded')
+
+    def test_missing_real_token_is_visible_as_failed_job_without_secrets(self):
+        with patch.dict('os.environ',{'KIS_DEMO_CANO':'12345678','KIS_DEMO_PRODUCT':'01'}):
+            self.assertEqual(self.request('/api/historical',{'date':'2026-11-13'})[0],200)
+            self.app.lookup_thread.join(2)
+            status,raw=self.request('/api/status')
+        data=json.loads(raw)
+        self.assertEqual(status,200)
+        self.assertEqual(data['lookup_job']['state'],'failed')
+        self.assertIn('SHARED_REAL_TOKEN_UNAVAILABLE',data['lookup_job']['message'])
+        self.assertIn('check --environment real',data['lookup_job']['message'])
+        self.assertIsNone(data['history'])
+        self.assertNotIn('12345678',raw.decode())
+
+    def test_unexpected_error_is_sanitized_and_retry_is_possible(self):
+        with patch.object(self.app,'engine'), patch.object(d,'History') as reader:
+            reader.return_value.load.side_effect=ValueError('private-secret')
+            self.app.action('historical',{'date':'2026-11-13'})
+            self.app.lookup_thread.join(2)
+            self.assertEqual(self.app.lookup_job['state'],'failed')
+            self.assertNotIn('private-secret',self.app.lookup_job['message'])
+            reader.return_value.load.side_effect=None
+            reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
+            self.app.action('historical',{'date':'2026-11-13'})
+            self.app.lookup_thread.join(2)
+        self.assertEqual(self.app.lookup_job['state'],'succeeded')
 
 if __name__=='__main__':unittest.main()

@@ -7,7 +7,8 @@ from macd_strategy import SYMBOL
 
 
 class History:
-    def __init__(self, engine, client=None):
+    def __init__(self, engine, client=None, progress=None):
+        self.progress=progress or (lambda message:None)
         self.db=engine.db
         self.client=client or ReadOnlyHistoryClient(engine.client.tokens.home)
         self.db.execute('CREATE TABLE IF NOT EXISTS history_days (symbol TEXT,day TEXT,source TEXT,observed TEXT,PRIMARY KEY(symbol,day))')
@@ -15,11 +16,13 @@ class History:
     def day(self, date):
         row=self.db.execute('SELECT source FROM history_days WHERE symbol=? AND day=?',(SYMBOL,date.isoformat())).fetchone()
         if row:
+            self.progress(date.isoformat()+' · 저장된 과거 분봉 읽는 중…')
             return [json.loads(r[0]) for r in self.db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',
                 (SYMBOL,date.isoformat(),(date+timedelta(days=1)).isoformat()))]
         cursor=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=15,minute=30)
         rows={}
-        for _ in range(5):
+        for page in range(5):
+            self.progress(date.isoformat()+' · 과거 1분봉 '+str(page+1)+'/5페이지 조회 중…')
             data=self.client.request(HISTORY_PATH,'FHKST03010230',dict(FID_COND_MRKT_DIV_CODE='J',
                 FID_INPUT_ISCD=SYMBOL,FID_INPUT_HOUR_1=cursor.strftime('%H%M%S'),FID_INPUT_DATE_1=date.strftime('%Y%m%d'),
                 FID_PW_DATA_INCU_YN='N',FID_FAKE_TICK_INCU_YN='N'))
@@ -70,8 +73,10 @@ class History:
         if date>now.date() or date==now.date() and (now.hour,now.minute)<(15,30):
             raise TradingError('장 종료 후 확정된 거래일만 조회하세요.')
         if date.weekday()>=5:raise TradingError('주말이 아닌 거래일을 선택하세요.')
+        self.progress(cutoff+' · 과거 분봉 조회 준비 중…')
         raw=self.day(date)
         if not raw:raise TradingError('해당 날짜의 과거 분봉이 없습니다. 서버 보관 범위와 실전 조회 권한을 확인하세요.')
+        self.progress('MACD 준비용 이전 거래일 자료 확인 중…')
         warmup=[]
         # A prior trading session supplies EMA warm-up, never contributes P&L.
         for offset in range(1,8):
@@ -80,6 +85,7 @@ class History:
             prior=self.day(previous)
             if prior:
                 warmup=prior;break
+        self.progress('확정 3분봉 합성 및 MACD 계산 중…')
         bars=aggregate(warmup+raw,datetime.combine(date+timedelta(days=1),datetime.min.time(),tzinfo=KST))
         # Reset calculation at missing intraday bars, matching the live strategy.
         chart=[];segment=[]

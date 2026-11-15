@@ -114,3 +114,11 @@ class StrategyTests(unittest.TestCase):
         result=self.evaluate(self.sell)
         self.assertTrue(result['submitted'])
         self.assertEqual(self.client.orders[-1]['quantity'],2)
+
+    def test_stopped_inflight_evaluation_cannot_submit(self):
+        index=self.buy1
+        self.engine.market.rows=self.rows[:(index+1)*3]
+        now=self.start+timedelta(minutes=(index+1)*3,seconds=5)
+        result=self.engine.evaluate(self.cfg,True,now,allow_submit=lambda:False)
+        self.assertEqual(result['status'],'STOPPED')
+        self.assertEqual(self.client.orders,[])

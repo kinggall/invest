@@ -45,7 +45,7 @@ class MacdEngine(Engine):
         if quantity < 0:raise TradingError('POSITION_RECONCILIATION_REQUIRED')
         return quantity,pending
 
-    def evaluate(self, strategy, execute=False, now=None):
+    def evaluate(self, strategy, execute=False, now=None, allow_submit=None):
         cfg=validate(strategy)
         now=now or datetime.now(KST)
         # Sync first: positions are derived from confirmed fills, never order intentions.
@@ -104,6 +104,9 @@ class MacdEngine(Engine):
             snapshot['status']='DAILY_LIMIT'
             return snapshot
         if not execute:return snapshot
+        if allow_submit is not None and not allow_submit():
+            snapshot['status']='STOPPED'
+            return snapshot
         # Atomic same-bar reservation: preview does not consume a signal.
         existing=self.db.execute('SELECT status FROM signals WHERE event_id=?',(event_id,)).fetchone()
         if existing['status']!='OBSERVED':
@@ -125,7 +128,7 @@ class MacdEngine(Engine):
             # Serialize outstanding-order and position checks across dashboard instances.
             current,pending=self.position()
             existing=self.db.execute('SELECT status FROM signals WHERE event_id=?',(event_id,)).fetchone()
-            if pending or current!=position or existing['status']!='OBSERVED':
+            if pending or current!=position or existing['status']!='OBSERVED' or (allow_submit is not None and not allow_submit()):
                 self.db.execute('ROLLBACK')
                 snapshot['status']='ORDER_PENDING'
                 return snapshot
