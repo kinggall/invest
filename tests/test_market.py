@@ -41,3 +41,43 @@ class FlowTests(unittest.TestCase):
         result=self.engine.market.flow(SYMBOL,self.now+timedelta(days=1,minutes=1))
         self.assertIsNone(result['foreign'])
         self.assertEqual(result['error'],'QUERY_FAILED')
+
+class DailyClient:
+    account=Client.account
+    def __init__(self):
+        self.calls=[];self.symbol=SYMBOL
+        self.rows=[dict(stck_bsop_date=day,stck_oprc='10000',stck_hgpr='10100',stck_lwpr='9900',stck_clpr='10050',acml_vol='1234') for day in ['20261116','20261113','20261112','20261113']]
+    def request(self,path,tr,params):
+        self.calls.append((path,tr,params))
+        return {'output1':{'stck_shrn_iscd':self.symbol},'output2':self.rows}
+
+class DailyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.client=DailyClient();self.engine=MacdEngine(Path(self.tmp.name)/'state.db',self.client)
+        self.addCleanup(self.engine.db.close)
+        self.now=datetime(2026,11,16,10,tzinfo=KST)
+
+    def test_cutoff_excludes_future_rows_sorts_and_deduplicates(self):
+        bars=self.engine.market.daily(SYMBOL,'2026-11-13',self.now)
+        self.assertEqual([b['time'] for b in bars],['2026-11-12','2026-11-13'])
+        path,tr,params=self.client.calls[0]
+        self.assertTrue(path.endswith('inquire-daily-itemchartprice'))
+        self.assertEqual(tr,'FHKST03010100')
+        self.assertEqual(params['FID_INPUT_DATE_2'],'20261113')
+        self.assertEqual(params['FID_ORG_ADJ_PRC'],'0')
+        self.assertEqual(bars[-1]['volume'],1234)
+
+    def test_live_unclosed_daily_bar_is_excluded(self):
+        bars=self.engine.market.daily(SYMBOL,'2026-11-16',self.now)
+        self.assertEqual(bars[-1]['time'],'2026-11-13')
+        self.assertEqual(self.client.calls[0][2]['FID_INPUT_DATE_2'],'20261115')
+
+    def test_future_date_is_blocked_before_request(self):
+        with self.assertRaises(TradingError):self.engine.market.daily(SYMBOL,'2026-11-17',self.now)
+        self.assertEqual(self.client.calls,[])
+
+    def test_wrong_symbol_is_rejected(self):
+        self.client.symbol='005930'
+        with self.assertRaisesRegex(TradingError,'SYMBOL_MISMATCH'):
+            self.engine.market.daily(SYMBOL,'2026-11-13',self.now)

@@ -106,3 +106,11 @@ python -m unittest discover -s tests -v
 - 종목명/코드: 한투 공식 `https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip`의 `472150` 레코드 확인.
 - 기존 토큰 구조: `kinggall/domino` 커밋 `33c9b55a934f78c4920e09b8dff3d50d70392df3`.
 - API: `koreainvestment/open-trading-api` 커밋 `4a51f9126e719c352072b14b7df9222cb2691720`, `inquire_time_itemchartprice`, `inquire_investor_time_by_market`, `order_cash`, `inquire_daily_ccld` 공식 샘플.
+
+## 11월 13일 기준 일봉 차트
+
+관리 화면의 **과거 일봉 · 기준일 조회**에서 `2026-11-13`을 선택하고 **일봉 조회**를 누르세요. 해당 기준일까지 최대 100개의 수정주가 일봉·거래량·일봉 MACD와 최근 5거래일 OHLCV를 표시합니다. 차트에는 마지막 70봉을 표시하며 첫날/마지막 날짜를 표기합니다. 실제 마지막 거래일이 기준일과 다르면 별도로 표시합니다.
+
+기준일 이후의 데이터를 제외하고 날짜순으로 정렬합니다. 장중 당일을 선택해도 당일 미확정 일봉은 제외합니다. 이 조회는 MACD 자동매매의 3분봉 주기나 전략을 변경하지 않으며 신호 기록·주문을 생성하지 않습니다. 코스피 수급 패널은 현재 조회 자료이며 과거 일봉 날짜 당시의 수급을 재현하는 자료가 아닙니다.
+
+일봉은 한투 공식 `inquire-daily-itemchartprice` / `FHKST03010100`의 demo 조회를 사용합니다. 토큰 발급 없이 기존 demo 캐시를 재사용합니다. 수정주가의 역사 데이터 길이와 초기화 방식 차이로 HTS MACD와 다를 수 있습니다. 실제 11월 13일 OHLCV 수신과 브라우저 표시 검증은 사용자 PC에서 확인해야 합니다.

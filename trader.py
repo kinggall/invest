@@ -128,7 +128,8 @@ class DemoClient:
         self.send, self.interval, self.last = send, interval, 0
 
     def request(self, path, tr_id, payload, post=False, continuation=False):
-        allowed = {'/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice': {'FHKST03010200'},
+        allowed = {'/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice': {'FHKST03010100'},
+                   '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice': {'FHKST03010200'},
                    '/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market': {'FHPTJ04030000'}, QUOTE: {'FHKST01010100'}, ORDER: {'VTTC0011U', 'VTTC0012U'}, FILLS: {'VTTC0081R'}}
         if tr_id not in allowed.get(path, set()) or post != (path == ORDER):
             raise TradingError('ROUTE_BLOCKED')

@@ -4,6 +4,7 @@ import json
 from trader import KST, TradingError, integer
 
 MINUTES = '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice'
+DAILY = '/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice'
 FLOW = '/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market'
 
 
@@ -49,6 +50,41 @@ class MarketData:
                 break
             cursor = oldest - timedelta(minutes=1)
         return [json.loads(row[0]) for row in self.db.execute('SELECT value FROM (SELECT stamp,value FROM minutes WHERE symbol=? ORDER BY stamp DESC LIMIT 3000) ORDER BY stamp', (symbol,))]
+
+    def daily(self, symbol, cutoff, now=None):
+        now=now or datetime.now(KST)
+        try:
+            end=datetime.strptime(cutoff,'%Y-%m-%d').date()
+        except (ValueError,TypeError):
+            raise TradingError('기준일을 YYYY-MM-DD 형식으로 선택하세요.') from None
+        if end>now.date():raise TradingError('미래 날짜는 조회할 수 없습니다.')
+        if end==now.date() and (now.hour,now.minute)<(15,30):
+            end-=timedelta(days=1)  # Complete daily candles only.
+        start=end-timedelta(days=365)
+        data=self.client.request(DAILY,'FHKST03010100',dict(FID_COND_MRKT_DIV_CODE='J',
+            FID_INPUT_ISCD=symbol,FID_INPUT_DATE_1=start.strftime('%Y%m%d'),
+            FID_INPUT_DATE_2=end.strftime('%Y%m%d'),FID_PERIOD_DIV_CODE='D',FID_ORG_ADJ_PRC='0'))
+        if data.get('output1',{}).get('stck_shrn_iscd')!=symbol:
+            raise TradingError('DAILY_SYMBOL_MISMATCH')
+        raw=data.get('output2')
+        if not isinstance(raw,list):raise TradingError('DAILY_RESPONSE_INVALID')
+        bars={}
+        for item in raw:
+            stamp=item.get('stck_bsop_date','')
+            if not stamp:continue
+            try:day=datetime.strptime(stamp,'%Y%m%d').date()
+            except (ValueError,TypeError):raise TradingError('DAILY_DATE_INVALID') from None
+            if not start<=day<=end:continue
+            bar=dict(time=day.isoformat(),end=day.isoformat(),
+                open=integer(item.get('stck_oprc'),'OPEN'),high=integer(item.get('stck_hgpr'),'HIGH'),
+                low=integer(item.get('stck_lwpr'),'LOW'),close=integer(item.get('stck_clpr'),'CLOSE'),
+                volume=integer(item.get('acml_vol'),'VOLUME',0))
+            if bar['high']<max(bar['open'],bar['close'],bar['low']) or bar['low']>min(bar['open'],bar['close']):
+                raise TradingError('INVALID_DAILY_OHLC')
+            if day in bars and bars[day]!=bar:raise TradingError('DAILY_DUPLICATE_CONFLICT')
+            bars[day]=bar
+        if not bars:raise TradingError('해당 기준일까지 일봉 자료가 없습니다.')
+        return [bars[day] for day in sorted(bars)][-100:]
 
     def flow(self, symbol, now):
         # Market-wide KOSPI flow, not the ETF's own investor history.

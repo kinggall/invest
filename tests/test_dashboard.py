@@ -71,6 +71,18 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(old['symbol'],'005930')
         self.assertFalse(restarted.enabled)
 
+    def test_daily_chart_is_read_only_and_does_not_change_strategy(self):
+        before=self.app.strategy()
+        bars=[dict(time='2026-11-13',end='2026-11-13',open=100,high=110,low=90,close=105,volume=1000)]
+        with patch.object(self.app,'engine') as factory:
+            factory.return_value.market.daily.return_value=bars
+            self.app.action('daily',{'date':'2026-11-13'})
+            factory.return_value.client.order.assert_not_called()
+            factory.return_value.evaluate.assert_not_called()
+        self.assertEqual(self.app.history['last_date'],'2026-11-13')
+        self.assertEqual(self.app.strategy(),before)
+        self.assertFalse(self.app.enabled)
+
     def test_start_requires_existing_demo_token(self):
         with patch.object(d.SharedToken,'read',side_effect=TradingError('TOKEN_UNAVAILABLE')):
             self.assertEqual(self.request('/api/start',{})[0],400)
