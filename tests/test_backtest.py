@@ -68,3 +68,25 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(result['ending_shares'],0)
         self.assertEqual(result['trades'][-1]['exit_price'],150)
         self.assertEqual(result['net_pnl'],500)
+
+    def test_vwap_filter_uses_signal_bar_not_future_entry_bar(self):
+        data=sample()
+        for row in data['chart']:row['vwap']=1
+        data['chart'][0]['vwap']=110
+        blocked=simulate(data,1000,0,0,vwap_filter=True)
+        self.assertEqual(blocked['buy_count'],0)
+        self.assertEqual(blocked['vwap_filtered_signals'],1)
+        self.assertEqual(simulate(data,1000,0,0,vwap_filter=False)['net_pnl'],500)
+        data['chart'][0]['vwap']=90
+        data['chart'][1]['vwap']=200
+        allowed=simulate(data,1000,0,0,vwap_filter=True)
+        self.assertEqual(allowed['net_pnl'],500)
+
+    def test_vwap_missing_blocks_entries_but_does_not_block_exit(self):
+        data=sample()
+        self.assertEqual(simulate(data,1000,0,0,vwap_filter=True)['vwap_unavailable_signals'],1)
+        for row in data['chart']:row['vwap']=200
+        data['chart'][0]['vwap']=90
+        result=simulate(data,1000,0,0,vwap_filter=True)
+        self.assertEqual(result['sell_count'],1)
+        self.assertEqual(result['net_pnl'],500)

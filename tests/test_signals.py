@@ -28,3 +28,39 @@ class IndicatorTests(unittest.TestCase):
         self.assertEqual((result[0]['open'],result[0]['close'],result[0]['volume']),(10,13,6))
         self.assertEqual(len(aggregate(rows,start+timedelta(minutes=6))),2)
         self.assertEqual(len(aggregate(rows[:1]+rows[2:],start+timedelta(minutes=6))),1)
+
+class VWAPTests(unittest.TestCase):
+    def rows(self):
+        start=datetime(2026,11,16,9,tzinfo=KST)
+        prices=[100,200,300,400,500,600]
+        volumes=[1,2,1,1,1,1]
+        return [dict(time=(start+timedelta(minutes=i)).isoformat(),open=p,high=p,low=p,close=p,volume=volumes[i]) for i,p in enumerate(prices)]
+
+    def test_known_volume_weighted_values_and_no_future_leak(self):
+        from signals import session_vwap
+        rows=self.rows();now=datetime(2026,11,16,9,6,tzinfo=KST)
+        points=session_vwap(rows,aggregate(rows,now))
+        self.assertEqual(points[0]['vwap'],200)
+        self.assertAlmostEqual(points[1]['vwap'],2300/7)
+        self.assertAlmostEqual(points[0]['vwap_distance_pct'],50)
+        future=[dict(row) for row in rows]
+        for row in future[3:]:row.update(high=9999,low=9999,close=9999,volume=999)
+        self.assertEqual(session_vwap(future,aggregate(future,now))[0]['vwap'],200)
+
+    def test_new_day_resets_and_zero_volume_is_missing(self):
+        from signals import session_vwap
+        rows=self.rows()
+        tomorrow=[dict(row,time=(datetime.fromisoformat(row['time'])+timedelta(days=1)).isoformat(),high=1000,low=1000,close=1000,open=1000) for row in rows[:3]]
+        now=datetime(2026,11,17,9,6,tzinfo=KST)
+        points=session_vwap(rows+tomorrow,aggregate(rows+tomorrow,now))
+        self.assertEqual(points[-1]['vwap'],1000)
+        self.assertIsNone(points[-1]['vwap_change'])
+        for row in rows:row['volume']=0
+        self.assertTrue(all(p['vwap'] is None for p in session_vwap(rows,aggregate(rows,now))))
+
+    def test_missing_opening_minute_invalidates_reference(self):
+        from signals import session_vwap
+        rows=self.rows()[1:]
+        points=session_vwap(rows,aggregate(rows,datetime(2026,11,16,9,6,tzinfo=KST)))
+        self.assertEqual(len(points),1)
+        self.assertIsNone(points[0]['vwap'])

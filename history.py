@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 import json
 from trader import KST, TradingError, ReadOnlyHistoryClient, HISTORY_PATH, integer
-from signals import aggregate, macd
+from signals import aggregate, macd, session_vwap
 from macd_strategy import SYMBOL
 
 
@@ -86,7 +86,7 @@ class History:
             if prior:
                 warmup=prior;break
         self.progress('확정 3분봉 합성 및 MACD 계산 중…')
-        bars=aggregate(warmup+raw,datetime.combine(date+timedelta(days=1),datetime.min.time(),tzinfo=KST))
+        bars=session_vwap(warmup+raw,aggregate(warmup+raw,datetime.combine(date+timedelta(days=1),datetime.min.time(),tzinfo=KST)))
         # Reset calculation at missing intraday bars, matching the live strategy.
         chart=[];segment=[]
         for bar in bars:

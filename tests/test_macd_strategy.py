@@ -122,3 +122,18 @@ class StrategyTests(unittest.TestCase):
         result=self.engine.evaluate(self.cfg,True,now,allow_submit=lambda:False)
         self.assertEqual(result['status'],'STOPPED')
         self.assertEqual(self.client.orders,[])
+
+    def test_vwap_filters_entry_only_and_preview_does_not_consume_signal(self):
+        self.cfg['vwap_filter']=True
+        result=self.evaluate(self.buy1,False)
+        self.assertEqual(result['status'],'VWAP_FILTERED')
+        self.assertEqual(self.client.orders,[])
+        self.cfg['vwap_filter']=False
+        self.assertTrue(self.evaluate(self.buy1)['submitted'])
+        self.client.completed=True
+        self.cfg['vwap_filter']=True
+        self.assertTrue(self.evaluate(self.sell)['submitted'])
+
+    def test_vwap_filter_rejects_non_boolean_config(self):
+        self.cfg['vwap_filter']='false'
+        with self.assertRaises(TradingError):self.evaluate(self.buy1)

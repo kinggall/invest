@@ -145,10 +145,18 @@ class Dashboard:
                         self.history=loaded
                     if command=='backtest':
                         self.progress(job_id,'확정 3분봉으로 백테스트 계산 중…')
-                        result=simulate(loaded,initial=value.get('capital',10000000),
+                        options=dict(initial=value.get('capital',10000000),
                             fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
                             tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
                             force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
+                        selected=value.get('vwap_filter',False)
+                        if not isinstance(selected,bool):raise TradingError('INVALID_VWAP_FILTER')
+                        baseline=simulate(loaded,**options,vwap_filter=False)
+                        filtered=simulate(loaded,**options,vwap_filter=True)
+                        keys=('net_pnl','return_pct','max_drawdown_pct','buy_count','sell_count','round_trips','fees','vwap_filtered_signals','vwap_unavailable_signals')
+                        comparison=dict(baseline={k:baseline.get(k) for k in keys},
+                            vwap={k:filtered.get(k) for k in keys},selected='vwap' if selected else 'baseline')
+                        result=dict(filtered if selected else baseline,comparison=comparison)
                         with self.lock:
                             self.backtest=result
                 message={'preview':'지표·수급 조회 완료','sync':'체결 조회 완료','backtest':'백테스트 계산 완료','historical':'과거 3분봉 조회 완료'}[command]

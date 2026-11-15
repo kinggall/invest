@@ -96,6 +96,8 @@ class DashboardTests(unittest.TestCase):
             factory.return_value.client.order.assert_not_called()
             factory.return_value.evaluate.assert_not_called()
             self.assertEqual(simulator.call_args.kwargs['initial'],10000000)
+            self.assertEqual([call.kwargs['vwap_filter'] for call in simulator.call_args_list],[False,True])
+            self.assertEqual(self.app.backtest['comparison']['selected'],'baseline')
         self.assertEqual(self.app.backtest['net_pnl'],123)
         self.assertEqual(self.app.strategy(),before)
         self.assertFalse(self.app.enabled)

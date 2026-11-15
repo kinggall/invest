@@ -42,6 +42,22 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(result['foreign'])
         self.assertEqual(result['error'],'QUERY_FAILED')
 
+    def test_time_series_preserves_decreasing_net_buy_and_three_minute_change(self):
+        results=[]
+        for seconds,value in [(0,123),(60,150),(120,100),(180,180)]:
+            self.client.foreign=value
+            results.append(self.engine.market.flow(SYMBOL,self.now+timedelta(seconds=seconds)))
+        self.assertEqual(results[2]['foreign_change'],-50)
+        self.assertEqual(results[-1]['foreign_change'],80)
+        self.assertEqual(results[-1]['foreign_change_3m'],57)
+        self.assertEqual(results[-1]['comparison_3m_seconds'],180)
+        self.assertEqual(len(results[-1]['history']),4)
+        self.assertEqual(results[-1]['history'][2]['foreign_change'],-50)
+        self.assertNotIn('history',results[-1]['history'][0])
+        cached=self.engine.market.flow(SYMBOL,self.now+timedelta(seconds=181))
+        self.assertEqual(len(cached['history']),4)
+
+
 class DailyClient:
     account=Client.account
     def __init__(self):

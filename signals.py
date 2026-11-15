@@ -62,3 +62,57 @@ def macd(bars, fast=12, slow=26, signal=9):
             elif previous >= 0 and current < 0: cross = 'sell'
         output.append(dict(bar, macd=m, signal=s, histogram=None if s is None else m-s, cross=cross))
     return output
+
+
+def session_vwap(minutes, bars):
+    """Causal day-reset VWAP from minute HLC3*volume; gaps invalidate the day's reference."""
+    unique = {}
+    for row in minutes:
+        stamp = datetime.fromisoformat(row['time']).astimezone(KST)
+        if stamp.second or not ((9,0) <= (stamp.hour,stamp.minute) < (15,30)):
+            continue
+        if stamp in unique and any(unique[stamp][k] != row[k] for k in ('high','low','close','volume')):
+            raise TradingError('VWAP_MINUTE_CONFLICT')
+        unique[stamp] = row
+    cumulative = {}
+    day = None
+    total_value = total_volume = 0.0
+    complete = True
+    expected = None
+    for stamp, row in sorted(unique.items()):
+        if stamp.date() != day:
+            day = stamp.date()
+            total_value = total_volume = 0.0
+            complete = True
+            expected = stamp.replace(hour=9,minute=0,second=0,microsecond=0)
+        if stamp != expected:
+            complete = False
+        expected = stamp + timedelta(minutes=1)
+        try:
+            high,low,close,volume = (float(row[k]) for k in ('high','low','close','volume'))
+        except (TypeError,ValueError):
+            raise TradingError('VWAP_INPUT_INVALID') from None
+        if any(not math.isfinite(v) for v in (high,low,close,volume)) or min(high,low,close) <= 0 or volume < 0:
+            raise TradingError('VWAP_INPUT_INVALID')
+        total_value += ((high+low+close)/3)*volume
+        total_volume += volume
+        cumulative[expected] = total_value/total_volume if complete and total_volume > 0 else None
+    result = []
+    previous = None
+    previous_day = None
+    for bar in bars:
+        end = datetime.fromisoformat(bar['end']).astimezone(KST)
+        value = cumulative.get(end)
+        if end.date() != previous_day:
+            previous = None
+        change = value-previous if value is not None and previous is not None else None
+        result.append(dict(bar,vwap=value,vwap_change=change,
+            vwap_distance_pct=(bar['close']/value-1)*100 if value else None,
+            vwap_source='당일 1분봉 HLC3×거래량 근사 · 09:00 초기화'))
+        previous,previous_day = value,end.date()
+    return result
+
+
+def vwap_entry(bar):
+    value = bar.get('vwap')
+    return isinstance(value,(int,float)) and not isinstance(value,bool) and math.isfinite(value) and value>0 and bar['close']>value

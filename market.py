@@ -14,6 +14,7 @@ class MarketData:
         self.db, self.client = engine.db, engine.client
         self.db.execute('CREATE TABLE IF NOT EXISTS minutes (symbol TEXT, stamp TEXT, value TEXT, PRIMARY KEY(symbol,stamp))')
         self.db.execute('CREATE TABLE IF NOT EXISTS flows (symbol TEXT PRIMARY KEY, stamp TEXT, value TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS flow_samples (market TEXT,stamp TEXT,value TEXT,PRIMARY KEY(market,stamp))')
 
     def minutes(self, symbol, now):
         day = now.strftime('%Y%m%d')
@@ -92,9 +93,9 @@ class MarketData:
         cached = self.db.execute('SELECT stamp,value FROM flows WHERE symbol=?',(key,)).fetchone()
         previous = json.loads(cached['value']) if cached else None
         if cached and 0 <= (now-datetime.fromisoformat(cached['stamp'])).total_seconds() < 60:
-            return previous
+            return dict(previous,history=self.flow_history(now))
         value = dict(kind='kospi_intraday', market='KOSPI', foreign=None, institution=None,
-            foreign_change=None, institution_change=None, observed_at=now.isoformat(),
+            foreign_change=None, institution_change=None, foreign_change_3m=None, institution_change_3m=None, observed_at=now.isoformat(),
             source_time=None, unit='API 거래대금 원단위 (단위 미검증)',
             description='코스피 전체 누적 순매수 · 60초 조회. 조회시각은 원자료 갱신시각과 다릅니다.')
         try:
@@ -107,14 +108,31 @@ class MarketData:
             def signed(key):
                 raw=row.get(key)
                 if not isinstance(raw,(str,int)) or isinstance(raw,bool):raise TradingError('KOSPI_FLOW_VALUE_INVALID')
-                return int(raw)
+                try:return int(raw)
+                except (ValueError,TypeError):raise TradingError('KOSPI_FLOW_VALUE_INVALID') from None
             value.update(foreign=signed('frgn_ntby_tr_pbmn'),institution=signed('orgn_ntby_tr_pbmn'))
             # Do not invent a source timestamp when the endpoint has none.
-            if (previous and not previous.get('error') and previous['observed_at'][:10] == now.date().isoformat()):
+            if (previous and not previous.get('error') and previous['observed_at'][:10] == now.date().isoformat() and datetime.fromisoformat(previous['observed_at'])<now):
                 value['foreign_change']=value['foreign']-previous['foreign']
                 value['institution_change']=value['institution']-previous['institution']
                 value['comparison_at']=previous['observed_at']
+                value['comparison_seconds']=(now-datetime.fromisoformat(previous['observed_at'])).total_seconds()
+            lower=(now-timedelta(seconds=240)).isoformat()
+            upper=(now-timedelta(seconds=180)).isoformat()
+            for stored in self.db.execute('SELECT value FROM flow_samples WHERE market=? AND stamp>=? AND stamp<=? ORDER BY stamp DESC', (key,lower,upper)):
+                anchor=json.loads(stored[0])
+                if anchor.get('error') or anchor['observed_at'][:10]!=now.date().isoformat():continue
+                value['foreign_change_3m']=value['foreign']-anchor['foreign']
+                value['institution_change_3m']=value['institution']-anchor['institution']
+                value['comparison_3m_at']=anchor['observed_at']
+                value['comparison_3m_seconds']=(now-datetime.fromisoformat(anchor['observed_at'])).total_seconds()
+                break
         except TradingError as exc:
             value['error']=str(exc)
         self.db.execute('INSERT OR REPLACE INTO flows VALUES (?,?,?)',(key,now.isoformat(),json.dumps(value)))
-        return value
+        self.db.execute('INSERT OR REPLACE INTO flow_samples VALUES (?,?,?)',(key,now.isoformat(),json.dumps(value)))
+        return dict(value,history=self.flow_history(now))
+
+    def flow_history(self, now):
+        start=now.date().isoformat()
+        return [json.loads(row[0]) for row in self.db.execute('SELECT value FROM (SELECT stamp,value FROM flow_samples WHERE market=? AND stamp>=? AND stamp<=? ORDER BY stamp DESC LIMIT 60) ORDER BY stamp',('KOSPI',start,now.isoformat()))]

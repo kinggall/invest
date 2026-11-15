@@ -5,12 +5,12 @@ import re
 import sqlite3
 from trader import Engine, KST, TradingError, integer
 from market import MarketData
-from signals import aggregate, macd
+from signals import aggregate, macd, session_vwap, vwap_entry
 
 SYMBOL = '472150'
 NAME = 'TIGER 배당커버드콜액티브'
 DEFAULT = dict(id='tiger-macd-v1', mode='macd', symbol=SYMBOL, quantity=1, fast=12, slow=26,
-               signal=9, max_notional=100000, limit_offset_bps=10, max_daily_buys=10)
+               signal=9, max_notional=100000, limit_offset_bps=10, max_daily_buys=10, vwap_filter=False)
 
 
 def validate(value):
@@ -19,6 +19,8 @@ def validate(value):
         raise TradingError('고정 ETF 종목과 전략 ID를 확인하세요.')
     for key in ('quantity','fast','slow','signal','max_notional','max_daily_buys'):
         result[key]=integer(result[key],key.upper())
+    if not isinstance(result['vwap_filter'],bool):
+        raise TradingError('VWAP 필터는 켜기/끄기로 선택하세요.')
     result['limit_offset_bps']=integer(result['limit_offset_bps'],'OFFSET',0)
     if not (result['fast'] < result['slow'] <= 100 and result['signal'] <= 100 and result['limit_offset_bps'] <= 100):
         raise TradingError('MACD 기간 또는 지정가 허용폭을 확인하세요.')
@@ -53,7 +55,7 @@ class MacdEngine(Engine):
         position,pending=self.position()
         flow=self.market.flow(SYMBOL,now)
         minutes=self.market.minutes(SYMBOL,now)
-        bars=aggregate(minutes,now)
+        bars=session_vwap(minutes,aggregate(minutes,now))
         # Reset warm-up after missing intraday bars instead of silently bridging a data hole.
         for index in range(len(bars)-1,0,-1):
             previous=datetime.fromisoformat(bars[index-1]['time'])
@@ -74,7 +76,7 @@ class MacdEngine(Engine):
         day=now.strftime('%Y%m%d')
         if side:
             event_id=self.scope+':'+cfg['id']+':'+last['time']+':'+side
-            record=dict(strategy=cfg,bar=last,flow=flow,position=position,observed_at=now.isoformat())
+            record=dict(strategy=cfg,bar=last,flow={k:v for k,v in flow.items() if k!='history'},position=position,observed_at=now.isoformat())
             self.db.execute('INSERT OR IGNORE INTO signals VALUES (?,?,?,?,?,?)',
                 (event_id,self.scope,last['time'],side,'OBSERVED',json.dumps(record)))
             snapshot['event_id']=event_id
@@ -97,6 +99,11 @@ class MacdEngine(Engine):
             return snapshot
         if (side=='buy' and position>0) or (side=='sell' and position==0):
             snapshot['status']='POSITION_HOLD'
+            return snapshot
+        if side=='buy' and cfg['vwap_filter'] and not vwap_entry(last):
+            snapshot['status']='VWAP_UNAVAILABLE' if last.get('vwap') is None else 'VWAP_FILTERED'
+            record['entry_filter']=snapshot['status']
+            self.db.execute("UPDATE signals SET value=? WHERE event_id=? AND status='OBSERVED'",(json.dumps(record),event_id))
             return snapshot
         quantity=cfg['quantity'] if side=='buy' else position
         count=sum(json.loads(row[0]).get('side')=='buy' for row in self.db.execute('SELECT strategy FROM orders WHERE scope=? AND day=? AND symbol=?',(self.scope,day,SYMBOL)))
