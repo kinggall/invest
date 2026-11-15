@@ -1,0 +1,9 @@
+{
+  "id": "samsung-limit-v1",
+  "symbol": "005930",
+  "side": "buy",
+  "quantity": 1,
+  "trigger_price": 50000,
+  "limit_price": 50000,
+  "max_notional": 50000
+}
