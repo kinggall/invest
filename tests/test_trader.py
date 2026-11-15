@@ -115,6 +115,38 @@ class TradingTests(unittest.TestCase):
         self.client.send=pages
         self.assertEqual(self.engine.sync()[0]['status'],'SUBMITTED')
 
+    def test_protective_market_sell_uses_demo_transaction_and_zero_price(self):
+        cfg=dict(id='stop',symbol='472150',side='sell',quantity=2,limit_price=0,order_type='market',mode='risk_stop')
+        self.client.order(cfg)
+        _,headers,payload,post=self.calls[-1]
+        self.assertTrue(post)
+        self.assertEqual(headers['tr_id'],'VTTC0011U')
+        self.assertEqual(payload['ORD_DVSN'],'01')
+        self.assertEqual(payload['ORD_UNPR'],'0')
+        with self.assertRaises(t.TradingError):self.client.order(dict(cfg,side='buy'))
+        with self.assertRaises(t.TradingError):self.client.order(dict(cfg,symbol='005930'))
+
+    def test_market_fills_capture_actual_amount_and_validate_price_identity(self):
+        strategy=dict(symbol='472150',side='sell',quantity=2,limit_price=0,order_type='market',mode='risk_stop')
+        row=dict(strategy=json.dumps(strategy),day='20261116',symbol='472150',quantity=2,branch='001',order_no='000123')
+        def send(*args):
+            return dict(rt_cd='0',output1=[dict(odno='000123',pdno='472150',ord_dt='20261116',ord_qty='2',ord_unpr='0',
+                sll_buy_dvsn_cd='01',tot_ccld_qty='2',rmn_qty='0',tot_ccld_amt='30010',avg_prvs='15005')])
+        client=t.DemoClient(self.home,'12345678','01',send,0)
+        self.assertEqual(client.fills(row),('FILLED',2,30010))
+
+    def test_legacy_order_database_migration_preserves_records(self):
+        import sqlite3
+        path=self.home/'legacy.db'
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE orders (run_id TEXT PRIMARY KEY,scope TEXT,day TEXT,symbol TEXT,quantity INTEGER,strategy TEXT,status TEXT,order_no TEXT,branch TEXT,filled INTEGER)")
+            db.execute("INSERT INTO orders VALUES ('old','scope','20261116','472150',2,'{}','FILLED','1','001',2)")
+        engine=t.Engine(path,self.client)
+        self.addCleanup(engine.db.close)
+        row=engine.db.execute("SELECT * FROM orders WHERE run_id='old'").fetchone()
+        self.assertEqual(row['filled'],2)
+        self.assertIsNone(row['filled_cash'])
+
 
 class DiagnosticTests(unittest.TestCase):
     def test_http_status_and_code_exclude_secret_response(self):

@@ -6,11 +6,12 @@ import sqlite3
 from trader import Engine, KST, TradingError, integer
 from market import MarketData
 from signals import aggregate, macd, session_vwap, vwap_entry
+from risk import RiskManager, stop_percent
 
 SYMBOL = '472150'
 NAME = 'TIGER 배당커버드콜액티브'
 DEFAULT = dict(id='tiger-macd-v1', mode='macd', symbol=SYMBOL, quantity=1, fast=12, slow=26,
-               signal=9, max_notional=100000, limit_offset_bps=10, max_daily_buys=10, vwap_filter=False)
+               signal=9, max_notional=100000, limit_offset_bps=10, max_daily_buys=10, vwap_filter=False, stop_loss_enabled=False, stop_loss_pct=1.0)
 
 
 def validate(value):
@@ -19,6 +20,8 @@ def validate(value):
         raise TradingError('고정 ETF 종목과 전략 ID를 확인하세요.')
     for key in ('quantity','fast','slow','signal','max_notional','max_daily_buys'):
         result[key]=integer(result[key],key.upper())
+    if not isinstance(result['stop_loss_enabled'],bool):raise TradingError('INVALID_STOP_LOSS_ENABLED')
+    result['stop_loss_pct']=stop_percent(result['stop_loss_pct'])
     if not isinstance(result['vwap_filter'],bool):
         raise TradingError('VWAP 필터는 켜기/끄기로 선택하세요.')
     result['limit_offset_bps']=integer(result['limit_offset_bps'],'OFFSET',0)
@@ -34,6 +37,7 @@ class MacdEngine(Engine):
             event_id TEXT PRIMARY KEY, scope TEXT, bar_time TEXT, side TEXT,
             status TEXT, value TEXT)''')
         self.market=market_factory(self)
+        self.risk=RiskManager(self,SYMBOL)
 
     def position(self):
         rows=self.db.execute('SELECT * FROM orders WHERE scope=? AND symbol=?',(self.scope,SYMBOL)).fetchall()
@@ -68,6 +72,9 @@ class MacdEngine(Engine):
         last=points[-1] if points else None
         snapshot=dict(status='WARMUP', symbol=SYMBOL,name=NAME,position=position,pending=pending,
             flow=flow,chart=points[-120:],bars=len(bars),required_bars=needed,fills=fills,submitted=False)
+        if self.risk.latched():
+            snapshot['status']='RISK_HALTED'
+            return snapshot
         if not last or len(points)<needed:
             return snapshot
         stamp=datetime.fromisoformat(last['end'])
@@ -135,7 +142,7 @@ class MacdEngine(Engine):
             # Serialize outstanding-order and position checks across dashboard instances.
             current,pending=self.position()
             existing=self.db.execute('SELECT status FROM signals WHERE event_id=?',(event_id,)).fetchone()
-            if pending or current!=position or existing['status']!='OBSERVED' or (allow_submit is not None and not allow_submit()):
+            if self.risk.latched() or pending or current!=position or existing['status']!='OBSERVED' or (allow_submit is not None and not allow_submit()):
                 self.db.execute('ROLLBACK')
                 snapshot['status']='ORDER_PENDING'
                 return snapshot

@@ -164,3 +164,47 @@ class TrendExitTests(unittest.TestCase):
         self.assertEqual(result['reference_price_pnl'],32230)
         self.assertEqual(result['total_cost'],114528)
         self.assertEqual(result['reference_price_pnl']-result['total_cost'],result['net_pnl'])
+
+class ProtectiveStopTests(unittest.TestCase):
+    def data(self,lows=None):
+        start=datetime(2026,11,11,9,tzinfo=KST)
+        rows=[]
+        for index in range(5):
+            stamp=start+timedelta(minutes=3*index)
+            rows.append(dict(time=stamp.isoformat(),end=(stamp+timedelta(minutes=3)).isoformat(),
+                open=15000,high=15100,low=lows[index] if lows else 14950,close=15000,volume=100,
+                signal=0,macd=1,cross='buy' if index in (0,2) else None,vwap=14000,vwap_change=1))
+        return dict(cutoff='2026-11-11',chart=rows,missing_bars=[])
+
+    def test_same_bar_entry_and_intrabar_stop(self):
+        run=simulate(self.data([14950,14800,14950,14950,14950]),fee_bps=0,slippage_bps=0,stop_loss_enabled=True)
+        self.assertEqual(run['stop_count'],1);self.assertEqual(run['buy_count'],1)
+        self.assertEqual(run['trades'][0]['exit_price'],14850)
+        self.assertEqual(run['trades'][0]['exit_precision'],'within_bar')
+        self.assertEqual(run['trades'][0]['entry'],run['trades'][0]['exit'])
+        self.assertEqual(run['net_pnl'],-99900)
+
+    def test_open_gap_can_lose_more_than_one_percent(self):
+        data=self.data();data['chart'][2].update(open=14700,low=14600,close=14700)
+        run=simulate(data,fee_bps=0,slippage_bps=0,stop_loss_enabled=True)
+        self.assertEqual(run['trades'][0]['exit_price'],14700)
+        self.assertIn('갭',run['trades'][0]['reason'])
+        self.assertLess(run['return_pct'],-1)
+
+    def test_costs_can_push_net_loss_beyond_one_percent(self):
+        run=simulate(self.data([14950,14800,14950,14950,14950]),stop_loss_enabled=True)
+        self.assertLess(run['return_pct'],-1)
+        self.assertGreater(run['fees'],0)
+        self.assertEqual(run['stop_count'],1)
+
+    def test_planned_open_exit_precedes_later_intrabar_low(self):
+        data=self.data();data['chart'][1]['cross']='sell';data['chart'][2]['low']=14000
+        run=simulate(data,fee_bps=0,slippage_bps=0,stop_loss_enabled=True)
+        self.assertEqual(run['stop_count'],0)
+        self.assertEqual(run['trades'][0]['reason'],'MACD')
+
+    def test_reentry_switch_and_disabled_stop(self):
+        data=self.data([14950,14800,14950,14950,14950])
+        run=simulate(data,fee_bps=0,slippage_bps=0,stop_loss_enabled=True,stop_halt=False)
+        self.assertEqual(run['buy_count'],2)
+        self.assertEqual(simulate(data,fee_bps=0,slippage_bps=0,stop_loss_enabled=False)['stop_count'],0)

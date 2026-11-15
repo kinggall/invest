@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import sqlite3
 import time
+import threading
+from decimal import Decimal
 import urllib.request
 import urllib.error
 import ssl
@@ -148,6 +150,20 @@ class ReadOnlyHistoryClient:
         return data
 
 
+_demo_slot_lock=threading.Lock()
+_demo_next_slot=0.0
+
+
+def demo_slot(interval):
+    global _demo_next_slot
+    with _demo_slot_lock:
+        now=time.monotonic()
+        reserved=max(now,_demo_next_slot)
+        _demo_next_slot=reserved+interval
+    # Release the scheduler before I/O so slow data calls cannot lock out risk calls.
+    time.sleep(max(0,reserved-now))
+
+
 class DemoClient:
     def __init__(self, home, cano, product, send=transport, interval=0.6):
         if not re.fullmatch(r'\d{8}', cano) or not re.fullmatch(r'\d{2}', product):
@@ -167,7 +183,7 @@ class DemoClient:
                    'appkey': key, 'appsecret': secret, 'tr_id': tr_id, 'custtype': 'P'}
         if continuation:
             headers['tr_cont'] = 'N'
-        time.sleep(max(0, self.interval - (time.monotonic() - self.last)))
+        if self.interval>0:demo_slot(self.interval)
         try:
             data = self.send(path, headers, payload, post)
         except RequestFailure as exc:
@@ -191,8 +207,11 @@ class DemoClient:
         return integer(output.get('stck_prpr'), 'QUOTE')
 
     def order(self, strategy):
-        payload = dict(self.account, PDNO=strategy['symbol'], ORD_DVSN='00', ORD_QTY=str(strategy['quantity']),
-                       ORD_UNPR=str(strategy['limit_price']), EXCG_ID_DVSN_CD='KRX',
+        market=strategy.get('order_type','limit')=='market'
+        if market and (strategy.get('side')!='sell' or strategy.get('mode')!='risk_stop' or strategy.get('symbol')!='472150'):
+            raise TradingError('MARKET_ORDER_RESTRICTED_TO_PROTECTIVE_EXIT')
+        payload = dict(self.account, PDNO=strategy['symbol'], ORD_DVSN='01' if market else '00', ORD_QTY=str(strategy['quantity']),
+                       ORD_UNPR='0' if market else str(strategy['limit_price']), EXCG_ID_DVSN_CD='KRX',
                        SLL_TYPE='01' if strategy['side'] == 'sell' else '', CNDT_PRIC='')
         result = self.request(ORDER, 'VTTC0012U' if strategy['side'] == 'buy' else 'VTTC0011U', payload, True)['output']
         if not re.fullmatch(r'\d+', str(result.get('ODNO', ''))):
@@ -213,14 +232,28 @@ class DemoClient:
                     strategy = json.loads(row['strategy'])
                     if (integer(item.get('ord_qty'), 'ORDER_QTY') != row['quantity']
                             or item.get('sll_buy_dvsn_cd') != ('02' if strategy['side'] == 'buy' else '01')
-                            or integer(item.get('ord_unpr'), 'ORDER_PRICE') != strategy['limit_price']):
+                            or integer(item.get('ord_unpr'), 'ORDER_PRICE',0 if strategy.get('order_type')=='market' else 1) != strategy['limit_price']):
                         raise TradingError('ORDER_IDENTITY_MISMATCH')
                     filled = integer(item.get('tot_ccld_qty'), 'FILLED', 0)
                     remaining = integer(item.get('rmn_qty'), 'REMAINING', 0)
                     if filled > row['quantity'] or filled + remaining > row['quantity']:
                         raise TradingError('FILL_QUANTITY_MISMATCH')
                     status = 'FILLED' if filled == row['quantity'] else ('CANCELLED' if item.get('cncl_yn') == 'Y' else ('PARTIAL' if filled else 'SUBMITTED'))
-                    return status, filled
+                    amount=None
+                    if filled:
+                        def positive_decimal(raw):
+                            try:
+                                value=Decimal(str(raw))
+                                if value.is_finite() and value>0 and math.isfinite(float(value)):return value
+                            except Exception:pass
+                            return None
+                        total=positive_decimal(item.get('tot_ccld_amt'))
+                        average=positive_decimal(item.get('avg_prvs'))
+                        if total is not None and average is not None and abs(total/filled-average)>max(Decimal(1),average/10000):
+                            raise TradingError('FILL_PRICE_INCONSISTENT')
+                        value=total if total is not None else average*filled if average is not None else None
+                        if value is not None and math.isfinite(float(value)):amount=float(value)
+                    return status, filled, amount
             cursor = (data.get('ctx_area_fk100', '').strip(), data.get('ctx_area_nk100', '').strip())
             if not any(cursor):
                 return None
@@ -254,7 +287,12 @@ class Engine:
         self.scope = hashlib.sha256(json.dumps(client.account, sort_keys=True).encode()).hexdigest()
         self.db.execute('''CREATE TABLE IF NOT EXISTS orders (
             run_id TEXT PRIMARY KEY, scope TEXT, day TEXT, symbol TEXT, quantity INTEGER,
-            strategy TEXT, status TEXT, order_no TEXT DEFAULT '', branch TEXT DEFAULT '', filled INTEGER DEFAULT 0)''')
+            strategy TEXT, status TEXT, order_no TEXT DEFAULT '', branch TEXT DEFAULT '', filled INTEGER DEFAULT 0, filled_cash REAL)''')
+        columns={row[1] for row in self.db.execute('PRAGMA table_info(orders)')}
+        if 'filled_cash' not in columns:
+            try:self.db.execute('ALTER TABLE orders ADD COLUMN filled_cash REAL')
+            except sqlite3.OperationalError:
+                if 'filled_cash' not in {row[1] for row in self.db.execute('PRAGMA table_info(orders)')}:raise
 
     def run(self, strategy, execute=False, day=None):
         strategy = validate_strategy(dict(strategy))
@@ -277,21 +315,27 @@ class Engine:
         self.db.execute('UPDATE orders SET status=?,order_no=?,branch=? WHERE run_id=?', ('SUBMITTED', number, branch, run_id))
         return {'status': 'SUBMITTED', 'order_no': number}
 
-    def sync(self):
-        results = []
-        for row in self.db.execute("SELECT * FROM orders WHERE scope=? AND status IN ('SUBMITTED','PARTIAL','UNKNOWN')", (self.scope,)).fetchall():
+    def refresh_order(self,row):
+        result=self.client.fills(row)
+        if not result:return {'order_no':row['order_no'],'status':'NOT_FOUND'}
+        status,filled=result[:2]
+        amount=result[2] if len(result)>2 else None
+        if filled<row['filled']:raise TradingError('FILL_REGRESSION')
+        if amount is not None and (not math.isfinite(amount) or amount<0 or (filled and amount==0)):
+            raise TradingError('FILL_AMOUNT_INVALID')
+        if amount is None and filled==row['filled']:amount=row['filled_cash']
+        self.db.execute('UPDATE orders SET status=?,filled=?,filled_cash=? WHERE run_id=?',(status,filled,amount,row['run_id']))
+        return dict(order_no=row['order_no'],status=status,filled=filled)
+
+    def sync(self,symbol=None):
+        results=[]
+        sql="SELECT * FROM orders WHERE scope=? AND status IN ('SUBMITTED','PARTIAL','UNKNOWN')"
+        params=[self.scope]
+        if symbol is not None:sql+=" AND symbol=?";params.append(symbol)
+        for row in self.db.execute(sql,params).fetchall():
             if not row['order_no']:
-                results.append({'status': 'UNKNOWN', 'action': '한투 주문내역 확인 후 reconcile 명령으로 주문번호 연결'})
-                continue
-            result = self.client.fills(row)
-            if result:
-                status, filled = result
-                if filled < row['filled']:
-                    raise TradingError('FILL_REGRESSION')
-                self.db.execute('UPDATE orders SET status=?,filled=? WHERE run_id=?', (status, filled, row['run_id']))
-                results.append({'order_no': row['order_no'], 'status': status, 'filled': filled})
-            else:
-                results.append({'order_no': row['order_no'], 'status': 'NOT_FOUND'})
+                results.append({'status':'UNKNOWN','action':'한투 주문내역 확인 후 reconcile 명령으로 주문번호 연결'})
+            else:results.append(self.refresh_order(row))
         return results
 
 

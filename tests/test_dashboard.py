@@ -161,12 +161,56 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-compare3')
+        self.assertEqual(status['api_version'],'2026-11-risk4')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):
             status=json.loads(self.request('/api/status')[1])
             self.assertTrue(status['restart_required'])
             self.assertFalse(self.app.may_submit())
+
+    def test_stop_turns_off_both_entry_and_protective_monitor(self):
+        self.app.enabled=False;self.app.risk_active=True
+        self.app.action('stop',{})
+        self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
+        self.assertEqual(self.app.risk_snapshot['status'],'DISARMED')
+
+    def test_risk_monitor_does_not_wait_on_history_io_lock(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.app.risk_active=True
+        with patch.object(self.app,'engine') as factory:
+            factory.return_value.risk.check.return_value={'status':'WATCHING'}
+            self.app.io_lock.acquire()
+            try:
+                with ThreadPoolExecutor(max_workers=1) as pool:pool.submit(self.app.risk_tick).result(timeout=2)
+            finally:self.app.io_lock.release()
+        self.assertEqual(self.app.risk_snapshot['status'],'WATCHING')
+
+    def test_stop_backtest_includes_same_cost_without_stop_controls(self):
+        with patch.object(self.app,'engine'),patch.object(d,'History') as reader,patch.object(d,'simulate') as simulator:
+            reader.return_value.load.return_value={'cutoff':'2026-11-13','chart':[]}
+            simulator.side_effect=lambda data,**options:dict(net_pnl=-10 if options['stop_loss_enabled'] else -20,stop_count=1 if options['stop_loss_enabled'] else 0)
+            self.app.action('backtest',{'date':'2026-11-13','stop_loss_enabled':True,'stop_loss_pct':1,'fee_bps':2,'strategy':'vwap_hold'})
+            self.app.lookup_thread.join(2)
+            self.assertEqual(self.app.lookup_job['state'],'succeeded')
+            self.assertEqual(len(simulator.call_args_list),10)
+            self.assertEqual(self.app.backtest['without_stop']['vwap_hold']['net_pnl'],-20)
+            self.assertEqual(self.app.backtest['comparison']['vwap_hold']['net_pnl'],-10)
+            self.assertTrue(all(call.kwargs['fee_bps']==2 for call in simulator.call_args_list))
+
+    def test_explicit_start_can_resume_latched_exit_without_new_entries(self):
+        cfg=self.app.strategy();cfg['stop_loss_enabled']=True
+        self.app.action('strategy',cfg)
+        with patch.object(d.SharedToken,'read',return_value=('k','s','t')),patch.object(self.app,'client'),patch.object(self.app,'engine') as factory:
+            factory.return_value.risk.latched.return_value=True
+            factory.return_value.risk.position.return_value={'quantity':1,'pending':[]}
+            self.app.action('start',{})
+            self.assertFalse(self.app.enabled);self.assertTrue(self.app.risk_active)
+            factory.return_value.risk.reset.assert_not_called()
+            self.app.action('stop',{})
+            factory.return_value.risk.position.return_value={'quantity':0,'pending':[]}
+            self.app.action('start',{})
+            factory.return_value.risk.reset.assert_called_once()
+            self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
 
 if __name__=='__main__':unittest.main()

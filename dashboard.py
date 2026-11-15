@@ -20,13 +20,13 @@ from history import History
 from backtest import simulate, STRATEGIES
 
 
-API_VERSION = '2026-11-compare3'
+API_VERSION = '2026-11-risk4'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -39,6 +39,8 @@ class Dashboard:
         self.lock = threading.RLock()
         self.io_lock = threading.Lock()
         self.enabled = False
+        self.risk_active = False
+        self.risk_snapshot = dict(status='DISARMED',message='손절 감시 중지')
         self.shutdown = threading.Event()
         self.last_message = '중지됨'
         self.last_check = None
@@ -98,7 +100,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
@@ -119,6 +121,32 @@ class Dashboard:
     def may_submit(self):
         # Read atomic state without holding a lock across SQLite / network work.
         return self.enabled and not self.shutdown.is_set() and source_fingerprint()==self.source_fingerprint
+
+    def may_risk_submit(self):
+        return self.risk_active and not self.shutdown.is_set() and source_fingerprint()==self.source_fingerprint
+
+    def risk_tick(self):
+        cfg=validate(self.strategy())
+        engine=self.engine()
+        try:
+            result=engine.risk.check(cfg,execute=True,allow_submit=self.may_risk_submit)
+            with self.lock:
+                if not self.risk_active and not result.get('submitted'):return
+                self.risk_snapshot=result
+                if result.get('latched') or result['status']=='BASIS_UNAVAILABLE':self.enabled=False
+                if result['status'] in ('COMPLETE','DISABLED'):self.risk_active=False
+        finally:engine.db.close()
+
+    def risk_worker(self):
+        # Independent of historical-download I/O. API slots / latency can extend the interval.
+        while not self.shutdown.wait(1):
+            with self.lock:active=self.risk_active
+            if not active:continue
+            try:self.risk_tick()
+            except Exception as exc:
+                with self.lock:
+                    self.enabled=False
+                    self.risk_snapshot=dict(status='ERROR',message=self.lookup_error(exc),observed_at=datetime.now(KST).isoformat(timespec='seconds'))
 
     def progress(self, job_id, message):
         with self.lock:
@@ -161,7 +189,8 @@ class Dashboard:
                         options=dict(initial=value.get('capital',10000000),
                             fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
                             tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
-                            force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'])
+                            force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'],
+                            stop_loss_enabled=value.get('stop_loss_enabled',False),stop_loss_pct=value.get('stop_loss_pct',1),stop_halt=value.get('stop_halt',True))
                         selected=value.get('strategy')
                         if selected is None:
                             legacy=value.get('vwap_filter',False)
@@ -172,10 +201,17 @@ class Dashboard:
                         for number,(key,(label,rules)) in enumerate(STRATEGIES.items(),1):
                             self.progress(job_id,str(number)+'/5 · '+label+' 계산 중…')
                             variants[key]=simulate(loaded,**options,**rules)
-                        keys=('reference_price_pnl','total_cost','net_pnl','return_pct','max_drawdown_pct','buy_count','sell_count','round_trips','fees','tax','slippage_cost','vwap_filtered_signals','vwap_unavailable_signals','vwap_exit_unavailable_bars','macd_exits_held','ending_shares')
+                        keys=('reference_price_pnl','total_cost','net_pnl','return_pct','max_drawdown_pct','buy_count','sell_count','round_trips','fees','tax','slippage_cost','vwap_filtered_signals','vwap_unavailable_signals','vwap_exit_unavailable_bars','macd_exits_held','ending_shares','stop_count')
+                        without_stop={}
+                        if options['stop_loss_enabled']:
+                            control_options=dict(options,stop_loss_enabled=False)
+                            for key,(label,rules) in STRATEGIES.items():
+                                self.progress(job_id,'손절 미적용 대조 · '+label+' 계산 중…')
+                                control=simulate(loaded,**control_options,**rules)
+                                without_stop[key]={field:control.get(field) for field in keys}
                         comparison={key:{field:run.get(field) for field in keys} for key,run in variants.items()}
                         comparison['selected']=selected
-                        result=dict(variants[selected],comparison=comparison,variants=variants,run_id=job_id)
+                        result=dict(variants[selected],comparison=comparison,variants=variants,without_stop=without_stop,run_id=job_id)
                         with self.lock:
                             self.backtest=result
                 message={'preview':'지표·수급 조회 완료','sync':'체결 조회 완료','backtest':'백테스트 계산 완료','historical':'과거 3분봉 조회 완료'}[command]
@@ -192,8 +228,8 @@ class Dashboard:
     def action(self, command, value):
         with self.lock:
             if command == 'strategy':
-                if self.enabled:
-                    raise TradingError('먼저 자동 실행을 중지하세요.')
+                if self.enabled or self.risk_active:
+                    raise TradingError('먼저 자동 실행과 손절 감시를 중지하세요.')
                 strategy = validate(value)
                 with self.db() as db:
                     db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(strategy),))
@@ -213,12 +249,26 @@ class Dashboard:
             elif command == 'start':
                 SharedToken(self.home).read()
                 self.client()
-                validate(self.strategy())
-                self.enabled = True
-                self.last_message = '자동 실행 시작 · 확정 3분봉 MACD 신호 평가 / 코스피 수급 60초 조회'
+                cfg=validate(self.strategy())
+                engine=self.engine()
+                resume_exit=False
+                try:
+                    if engine.risk.latched():
+                        details=engine.risk.position()
+                        if details['quantity'] or details['pending']:
+                            if not cfg['stop_loss_enabled']:raise TradingError('손절 청산 미완료입니다. 손절을 켜고 감시를 재개하세요.')
+                            resume_exit=True
+                        else:engine.risk.reset()
+                finally:engine.db.close()
+                self.enabled=not resume_exit
+                self.risk_active=cfg['stop_loss_enabled']
+                self.risk_snapshot=dict(status='ARMED' if self.risk_active else 'DISABLED',percent=cfg['stop_loss_pct'],message='손절 감시 준비 중' if self.risk_active else '손절 기능 꺼짐')
+                self.last_message = '손절 청산 감시 재개 · 신규 진입 중지' if resume_exit else '자동 실행 시작 · 확정 3분봉 MACD 신호 평가 / 코스피 수급 60초 조회'
             elif command == 'stop':
                 self.enabled = False
-                self.last_message = '자동 실행 중지 · 기존 미체결 주문은 유지됩니다.'
+                self.risk_active=False
+                self.risk_snapshot=dict(status='DISARMED',message='사용자 중지 · 손절 감시도 중지됨')
+                self.last_message = '자동 실행·손절 감시 중지 · 기존 주문과 보유는 유지됩니다.'
             else:
                 raise TradingError('알 수 없는 요청')
 
@@ -301,6 +351,7 @@ def main():
     app = Dashboard(args.domino_home, args.state)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(app))
     threading.Thread(target=app.worker, daemon=True).start()
+    threading.Thread(target=app.risk_worker, daemon=True).start()
     url = 'http://127.0.0.1:' + str(server.server_port)
     print('모의투자 관리: ' + url, flush=True)
     if not args.no_browser:
