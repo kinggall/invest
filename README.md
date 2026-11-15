@@ -1,128 +1,108 @@
 # invest
 
-한국투자증권 모의투자 전략을 실행하고 주문·체결을 확인하는 독립 프로젝트입니다. 기존 `kinggall/domino`의 overview와 코드는 변경하지 않습니다. Python 3.10 이상으로 실행하며 외부 패키지는 필요 없습니다.
+**TIGER 배당커버드콜액티브 (`472150`) 한 종목**을 3분봉 MACD 교차로 모의 매매합니다. 코스피 전체 외국인·기관 수급을 60초마다 조회하고, 신호 발생 당시 값과 함께 기록합니다. 기존 `kinggall/domino`와 overview는 변경하지 않습니다. Python 3.10 이상, 외부 패키지 없이 실행합니다.
 
-## Windows 설치와 실행
+## 설치 / 업데이트
 
-PowerShell에서 실행합니다. Git이 설치되어 있어야 합니다.
+최초 설치:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\projects" | Out-Null
 git clone https://github.com/kinggall/invest.git "$env:USERPROFILE\projects\invest"
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\projects\invest\start-dashboard.ps1"
 ```
 
-브라우저에서 **http://127.0.0.1:8766**이 열립니다. ExecutionPolicy 옵션은 이 프로세스에만 적용하며 PC의 정책을 변경하지 않습니다.
-
-실행 스크립트는 명시한 `-DominoHome`, 기존 `DOMINO_HOME`, 저장된 데이터 폴더 순으로 선택합니다. 모두 미설정이면 사용자 `projects/domino-code` 및 `C:/domino`에 `kis_config.json`이 있는지 확인합니다. 찾지 못하면 **기존 설정·토큰이 저장된 데이터 폴더**를 PC에서 입력받습니다. 기존 코드가 있는 폴더와 데이터 폴더는 다를 수 있습니다. 키나 토큰 문자열을 입력하는 절차가 아닙니다.
-
-모의계좌 번호는 최초 실행 시 PC에서 하이픈 없는 8자리를 입력합니다. 데이터 폴더·모의계좌 번호·상품코드는 `%LOCALAPPDATA%/invest/settings.json`에 저장하며 다음 실행과 진단에서 자동 재사용합니다. 이 파일은 Git 저장소 밖에 있으며 키·시크릿·토큰은 저장하지 않습니다. 상품코드는 `01`이 기본값입니다. 다른 상품코드가 필요하면 실행 전에 `$env:KIS_DEMO_PRODUCT`에 지정하세요. 계좌·키·토큰을 채팅이나 GitHub에 올리지 마세요.
-
-데이터 폴더를 명시하려면:
+기존 사용자는 서버를 `Ctrl+C`로 종료한 뒤:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\projects\invest\start-dashboard.ps1" -DominoHome 'D:\실제데이터폴더'
+cd "$env:USERPROFILE\projects\invest"
+git pull --ff-only
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1
 ```
 
-페이지에서 **전략 저장 → 시세·조건 확인 → 모의 자동매매 시작** 순서로 사용합니다. 실행 중에는 전략 변경을 잠급니다. Python 서버를 재시작하면 항상 중지 상태로 시작합니다.
+브라우저에서 **http://127.0.0.1:8766**이 열립니다. 전략 저장 → 지표·수급 조회 → 결과 확인 → 모의 자동매매 시작 순서로 사용합니다. 시작 버튼을 누르기 전에는 조회·신호 기록만 수행합니다. 서버가 켜져 있으면 자동매매 중지 상태에서도 60초마다 지표·수급을 조회합니다.
 
-## 관리 페이지
-
-- 전략: 종목코드, 매수·매도, 수량, 기준 가격, 지정가, 주문금액 상한.
-- 실행: 저장된 전략을 10초마다 평가하고 조건 충족 시 모의 주문 전송.
-- 조회: 이 프로젝트에서 기록한 최근 100건의 주문·부분체결·전체체결·취소 상태.
-- 연결 상태: 기존 demo 토큰, 모의계좌 설정, 최근 실행 결과.
-
-매수는 현재가가 기준 가격 이하, 매도는 이상일 때 지정가 주문을 전송합니다. 주문금액 상한은 지정가×수량의 주문 1건 상한입니다. 예시 전략의 가격은 사용법 설명용이므로 직접 수정하세요. 같은 계좌·한국 날짜·전략 ID는 같은 DB에서 하루 한 번만 주문합니다.
-
-페이지를 닫아도 Python 서버가 실행 중이면 자동매매는 계속됩니다. **중지 버튼은 다음 전략 실행을 멈추며, 이미 전송된 미체결 주문을 취소하지 않습니다.** 통신·토큰 오류가 나면 자동 실행을 중지합니다. 취소·정정은 이 버전에서 지원하지 않습니다.
-
-계좌 전체 잔고·수익률·다른 프로그램의 주문은 수집하지 않습니다. 국내주식 KRX 지정가 모의투자 전용이며, 해외주식·실전매매는 지원하지 않습니다. 주문가능시간·호가단위·잔고·매도가능수량은 한투가 최종 검증합니다.
-
-## 토큰 중복 발급 방지
-
-**invest에는 토큰 발급 기능이 없습니다.** 기존 PC 데이터 폴더의 `kis_config.json` demo 프로필과 `kis_token_demo.json`을 읽기만 합니다. 기존 프로그램의 기본 설정이 real이어도 demo만 선택합니다. 실전 호스트·실전 TR·토큰 발급 경로는 허용하지 않습니다.
-
-요청마다 demo+앱키+시크릿의 SHA256 binding과 만료시간을 확인합니다. 토큰 만료 120초 전부터 중단하며 기존 설정·토큰 파일을 쓰거나 삭제하지 않습니다. 기존 프로그램이 토큰을 갱신하면 다음 요청부터 반영합니다. 키/토큰은 브라우저에 전달하지 않습니다.
-
-유효한 demo 토큰이 없다면 기존 domino에서 준비해야 합니다. 확인된 기존 코드 위치는 `C:/Users/shoh7/projects/domino-code/domino_kis.py`입니다. 기존 데이터 폴더가 `DOMINO_HOME`으로 올바르게 지정된 동일 PC 환경에서 실행합니다:
+계좌번호·상품코드·데이터 폴더는 `%LOCALAPPDATA%/invest/settings.json`에 저장해 재사용합니다. 키·토큰을 새로 입력하거나 복사하지 않습니다. 기존 `DOMINO_HOME`, 저장한 데이터 폴더, 기존 코드 폴더 순서로 찾고, 없으면 PC에서 기존 `kis_config.json`이 있는 폴더를 입력받습니다. 계좌번호는 평문 로컬 파일에 저장되며 GitHub에는 올라가지 않습니다. `-Reconfigure`로 다시 설정할 수 있습니다.
 
 ```powershell
-python "$env:USERPROFILE\projects\domino-code\domino_kis.py" check --environment demo
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1 -Reconfigure
 ```
 
-demo 프로필 자체가 없다면 기존 프로그램의 `configure --environment demo`로 PC에서 먼저 설정하세요. 실전 키와 모의 키는 서로 다릅니다. 토큰 발급 주체는 기존 domino 하나로 유지합니다. 기존 인증 코드 자체에는 프로세스 간 잠금이 없으므로 기존 인증 명령 여러 개를 동시에 실행하지 마세요. 기존 프로그램과 invest의 호출량은 계정 단위로 합산됩니다. invest는 호출 간 최소 0.6초 간격을 둡니다.
+ExecutionPolicy 옵션은 해당 프로세스에만 적용하며 PC의 정책을 바꾸지 않습니다. 상품코드 기본값은 `01`입니다. 명시한 `-DominoHome`과 계좌 환경변수가 저장된 값보다 우선합니다. 기존 주문 DB·토큰은 유지됩니다.
 
-기존과 같은 `KIS_ENV=demo`, `KIS_APP_KEY`, `KIS_APP_SECRET` 쌍을 사용하면 같은 binding을 검사합니다. 환경변수만 쓰더라도 기존 demo 프로필 파일을 준비해야 합니다.
+## 매매 규칙
 
-## 기록 보존과 주문 불확실성
+- 대상 고정: TIGER 배당커버드콜액티브, `472150`.
+- 확정된 3분봉 종가로 MACD 계산. 기본 `(12,26,9)`, SMA로 EMA를 초기화합니다.
+- 직전 MACD가 시그널 이하이고 현재 MACD가 시그널보다 높으면 매수 신호.
+- 직전 MACD가 시그널 이상이고 현재 MACD가 시그널보다 낮으면 매도 신호.
+- 보유 0일 때만 매수. 보유 중 추가 매수 없이, 하향 교차에서 이 프로젝트가 체결 확인한 해당 ETF 보유 수량을 매도합니다.
+- 매도 체결 후 다음 상향 교차에 재진입하므로 하루 여러 차례 거래할 수 있습니다.
+- 같은 계좌·전략·3분봉·방향은 한 번만 주문. 미체결·부분체결·접수 불명 주문이 있으면 신규 주문을 보류합니다.
+- 신호 시 현재가에 지정가 허용폭을 적용하고 ETF의 5원 호가단위로 맞춥니다. 기본 10bp(0.1%). 지정가이므로 체결은 보장되지 않습니다.
+- 기본 매수 1주·매수금액 상한 10만원·하루 매수 상한 10건. 매수 상한으로 매도·청산이 차단되지는 않습니다.
 
-기본 DB는 프로젝트의 `runtime/orders.sqlite3`입니다. 실행 스크립트는 작업 폴더에 관계없이 이 경로를 고정합니다. CLI에서도 같은 DB를 사용하세요. DB를 삭제하거나 다른 DB·다른 PC에서 실행하면 중복 방지가 공유되지 않습니다. 서버는 한 개만 실행하세요.
+이전 단순 가격 전략 설정은 별도로 백업하고 MACD 기본 설정으로 전환합니다. 삼성전자 등 기존 주문 기록은 삭제하지 않습니다. MACD 신규 주문은 472150만 대상으로 하며, 해당 ETF의 기존 접수 불명 주문은 확인될 때까지 다음 주문을 막습니다.
 
-주문 전 SQLite에 UNKNOWN 의도를 커밋합니다. 응답이 끊기거나 불명확해도 자동 재주문하지 않습니다. UNKNOWN은 페이지에서 ‘접수 확인 필요’로 표시합니다. 실제 한투 모의 주문내역을 확인한 뒤 다음 명령으로 주문번호를 연결할 수 있습니다:
+미완성 3분봉은 사용하지 않습니다. 1분 OHLCV 3개가 모두 있을 때만 합치며, 장중 봉 누락이 있으면 그 이후부터 지표 준비를 다시 시작합니다. 0거래량 봉을 임의 생성하지 않습니다. 신호 판단은 확정 후 90초 이내의 최신 봉에 한정합니다. 주말·09:00 이전·15:20 이후·자료 지연에는 새 주문을 내지 않습니다. 휴장일은 당일 확정봉이 없으므로 주문하지 않으며 별도 거래소 휴장 캘린더는 아직 없습니다.
+
+기본 설정의 교차 판정에는 최소 35개 확정 3분봉이 필요합니다. 캐시가 없는 첫날에는 약 105분 이상의 당일 데이터가 필요합니다. 당일 분봉을 최대 14회로 나누어 과거부터 수집하고 이후 DB에 축적합니다. 전일 분봉은 API에서 제공되지 않으며, 이전 실행에서 축적한 데이터가 있으면 이어서 사용합니다. HTS와 과거 데이터 길이·초깃값이 다르면 MACD 값도 다를 수 있습니다.
+
+## 코스피 수급 — 60초 조회
+
+ETF 자체의 종목별 수급이 아닌 **코스피 시장 전체**를 조회합니다.
+
+- API: `/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market`
+- TR: `FHPTJ04030000`, `FID_INPUT_ISCD=999`, `FID_INPUT_ISCD_2=S001`.
+- 외국인·기관 누적 순매수 거래대금과 직전 성공 조회 대비 변화를 표시합니다.
+- 수급은 우선 **표시·기록용이며 매수·매도 필터로 사용하지 않습니다.**
+- 60초는 이 프로그램의 조회 간격입니다. 원자료가 매분 새로 집계된다는 보장은 없습니다. API가 원자료 갱신시각을 제공하지 않으면 조회시각과 명확히 구분합니다.
+- 거래대금 단위를 실제 응답과 공식 명세로 확정하기 전에는 API 원값으로 표시하며 원·억원으로 임의 변환하지 않습니다.
+- 모의 API 지원 여부는 실제 계정에서 검증하지 못했습니다. 거절·자료 없음은 ‘수급 미수신’으로 표시하며 0이나 종목별/일별 수급으로 대체하지 않습니다. 실전 토큰으로 자동 전환하지 않습니다.
+- 수급 조회 실패는 기록에 남고, 표시용 자료이므로 MACD 전략 신호 자체를 차단하지는 않습니다.
+
+신호 로그에 3분봉 시각·MACD/시그널·전략 파라미터·관측시각·당시 수급 스냅샷을 저장합니다. 같은 날 다른 조회일 때만 변화량을 계산하며, 실패 직후·다음 날 첫 조회는 변화량 없음으로 표시합니다.
+
+## 주문 기록과 중지
+
+실제 체결을 기준으로 보유 수량을 계산하며 의도한 주문 수량을 보유로 간주하지 않습니다. 표시되는 보유는 이 프로젝트 기록 기준이며 한투 계좌 전체 보유나 외부 수동 주문을 수집하지 않습니다. 수동 매매·외부 프로그램과 같은 ETF를 병행하면 별도 대사가 필요합니다.
+
+주문 전 SQLite에 UNKNOWN 의도를 커밋합니다. 타임아웃·에러·응답 유실은 자동 재시도하지 않고 ‘접수 확인 필요’로 보존합니다. 같은 봉 예약과 미처리 주문 검사를 SQLite 트랜잭션으로 직렬화합니다. 주문내역을 확인하지 않은 채 전략 ID 변경이나 DB 삭제로 재주문하지 마세요.
+
+주문번호를 한투 모의 주문내역에서 확인했다면 다음 예시의 실제 값들을 바꿔 연결합니다:
 
 ```powershell
-Set-Location "$env:USERPROFILE\projects\invest"
-python trader.py --domino-home 'D:\실제데이터폴더' reconcile --strategy-id samsung-limit-v1 --day 20261116 --order-no 0000123456 --branch 001
-```
-
-명령의 날짜·ID·번호·지점은 실제 주문으로 바꾸세요. 조회된 주문일·종목·주문번호·매수매도·수량·가격이 일치해야 연결됩니다. 같은 조건 주문이 여러 개라면 직접 확인해야 합니다. UNKNOWN 기록을 자동 삭제하거나 미접수로 단정해 재전송하는 기능은 없습니다.
-
-## 명령행 실행
-
-```powershell
-Set-Location "$env:USERPROFILE\projects\invest"
 $env:KIS_DEMO_CANO = '본인의모의계좌8자리'
-$env:KIS_DEMO_PRODUCT = '01'
-python trader.py --domino-home 'D:\실제데이터폴더' run strategy.example.json
-python trader.py --domino-home 'D:\실제데이터폴더' run strategy.example.json --execute-demo
-python trader.py --domino-home 'D:\실제데이터폴더' sync
+python trader.py --domino-home 'D:\실제데이터폴더' reconcile --strategy-id '로그의실제전략ID' --day 20261116 --order-no 0000123456 --branch 001
 ```
 
-`run`은 한 번 평가하고 종료합니다. `--execute-demo`가 있어야 주문합니다. `sync`는 저장된 주문일·주문번호로 체결을 조회합니다. 부분체결·전체체결·취소를 저장하고 조회내역이 없으면 NOT_FOUND로 표시하며 기존 상태는 보존합니다. 자동 취소는 하지 않습니다.
+MACD 주문 ID는 기본 전략 ID 뒤에 봉 종료시각과 방향이 붙습니다. 정확한 ID는 로컬 `orders` 테이블의 `strategy` JSON에 저장됩니다. 연결 시 종목·날짜·방향·수량·가격을 조회 응답과 검증합니다. 부분체결·전체체결·취소 상태를 저장하고, 조회에 없으면 기존 상태를 유지합니다.
 
-대시보드를 직접 실행할 때는:
+자동 실행 중지는 다음 전략 실행을 멈추며, 이미 전송된 미체결 주문을 취소하지 않습니다. 취소·정정·시간초과 청산·손절·장마감 강제청산은 아직 없습니다. 신호가 반전돼도 미체결 주문은 먼저 한투에서 확인해야 합니다. 페이지를 닫아도 Python 서버가 실행 중이면 자동매매는 계속됩니다. 서버 재시작은 항상 중지 상태입니다.
+
+DB는 프로젝트의 `runtime/orders.sqlite3`입니다. 실행 스크립트는 이 절대 경로를 고정합니다. 다른 DB·다른 PC에서는 중복 방지가 공유되지 않습니다. 서버는 하나만 실행하고 DB를 보존하세요. 서버는 127.0.0.1에만 바인딩하며 Host·Origin·CSRF를 검사합니다. 외부에 노출하지 마세요.
+
+## 토큰과 진단
+
+invest에는 토큰 발급 기능이 없습니다. 기존 PC의 `kis_config.json` demo 프로필과 `kis_token_demo.json`을 읽기만 합니다. demo+키+시크릿 SHA256 binding과 만료시간을 확인하고 만료 120초 전부터 중단합니다. 기존 프로그램이 갱신한 토큰은 다음 요청에 반영합니다. 키·토큰은 브라우저에 전달하지 않습니다. 실전 호스트·실전 주문 TR·토큰 발급 경로는 차단합니다.
+
+기존 domino와 호출량은 합산됩니다. invest는 API 호출 간 최소 0.6초 간격을 두지만 전체 계정의 호출량은 보장하지 않습니다. 기존 인증 코드에는 프로세스 간 잠금이 없으므로 기존 인증 명령을 동시에 여러 개 실행하지 마세요.
+
+진단:
 
 ```powershell
-python dashboard.py --domino-home 'D:\실제데이터폴더' --state runtime/orders.sqlite3
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1 -Diagnose
 ```
 
-모의계좌 환경변수가 없어도 페이지는 열리며 설정 상태를 보여줍니다. 서버는 127.0.0.1에만 바인딩하고 Host·Origin·CSRF를 검사합니다. 서버를 외부에 노출하지 마세요. 로컬의 신뢰할 수 없는 프로그램에 대한 사용자 인증 체계는 아닙니다.
+진단은 기존 모의 시세·주문내역 조회만 수행하며 주문·토큰 발급을 하지 않습니다. 단계·HTTP 상태·검증된 오류 코드만 출력합니다. 서버 원문·계좌·키·토큰은 출력하지 않습니다. 기존 오류는 소급 복원할 수 없습니다. 기존 `EGW02007` 오류의 원인은 아직 확정되지 않았으며 새 전략 구현이 이 API 문제를 해결했다는 의미는 아닙니다.
 
-## 검증과 참고
+## 검증과 출처
 
 ```text
 python -m unittest discover -s tests -v
 ```
 
-15개 테스트로 토큰 읽기 전용·교체·만료·binding, 실전/인증 경로 차단, 주문금액 상한, 미리보기, 재시작 중복 방지, 타임아웃 UNKNOWN, 부분/전체체결, 종목 검증, 연속조회, HTTP 상태, CSRF/외부 출처 차단, 전략 저장·실행 중 편집 차단, 재시작 중지를 검증했습니다.
+지표의 EMA 기준값·미래 데이터 비참조·확정봉/누락봉 처리, 매수→매도→동일일 재진입, 부분체결 대기, UNKNOWN 재시도 차단, 미리보기와 주문 분리, 수급 60초 캐시·코스피 파라미터·결측치·날짜별 변화량, 기존 HTTP/토큰/주문 테스트를 포함합니다. 실제 한투 모의 주문·분봉·코스피 수급, Windows 실행과 브라우저 시각 검증은 아직 수행하지 못했습니다. 신호 계산이 수익성을 보장하지 않습니다.
 
-실제 한투 인증·모의 주문·체결, Windows PowerShell 실행과 실제 브라우저 화면 검증은 수행하지 못했습니다. 테스트 통과는 실제 주문 성공이나 전략 수익성을 의미하지 않습니다.
-
-참고 코드:
-
-- `kinggall/domino` 커밋 `33c9b55a934f78c4920e09b8dff3d50d70392df3`: `domino_kis.py`, `docs/KIS.md`.
-- `koreainvestment/open-trading-api` 커밋 `4a51f9126e719c352072b14b7df9222cb2691720`: `examples_llm/domestic_stock/order_cash/order_cash.py`, `inquire_daily_ccld/inquire_daily_ccld.py`.
-- 모의 TR: 매수 `VTTC0012U`, 매도 `VTTC0011U`, 최근 체결조회 `VTTC0081R`.
-
-### 주문 접수 상태가 불명확할 때
-
-`REQUEST_UNCERTAIN`은 주문 성공·실패를 확정할 수 없는 상태입니다. 자동 실행을 중지한 채 한투 모의 주문내역에서 실제 접수 여부를 먼저 확인하세요. 전략 ID 변경이나 DB 삭제로 재주문하지 마세요. 기존 UNKNOWN은 업데이트 후에도 유지됩니다.
-
-진단은 주문·토큰 발급 없이 모의 시세와 모의 주문내역 조회만 수행합니다:
-
-```powershell
-Set-Location "$env:USERPROFILE\projects\invest"
-git pull --ff-only
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start-dashboard.ps1 -Diagnose
-```
-
-진단 출력에는 단계, HTTP 상태, 검증된 한투 오류 코드만 포함합니다. 키·토큰·계좌번호·서버 원문 메시지는 출력하지 않습니다. HTTP 500을 포함한 주문 오류도 자동 재시도하지 않습니다. 기존 오류의 상세 원인은 소급해 복원할 수 없으며, 조회 진단이 주문 권한·주문시간·주문 필드의 유효성까지 보장하지는 않습니다. 기록일이 주말·휴장일이면 시세 조회가 성공해도 주문은 제한될 수 있습니다.
-
-### 저장한 모의계좌 설정 변경
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\projects\invest\start-dashboard.ps1" -Reconfigure
-```
-
-이 옵션은 저장된 설정을 다시 입력받고 교체합니다. 데이터 폴더는 명시한 `-DominoHome`이나 기존 `DOMINO_HOME`이 없으면 입력받습니다. 계좌번호와 상품코드는 다시 입력받습니다. 일반 실행 및 `-Diagnose`는 저장된 설정을 재사용합니다. 명시한 계좌 환경변수는 저장된 값보다 우선하며 정상 검증 후 로컬 설정에 반영됩니다. 잘못된 입력은 기존 설정을 덮어쓰지 않습니다. 로컬 파일의 계좌번호는 평문이므로 다른 사람에게 공유하지 마세요. 기존 주문 DB와 토큰은 변경하지 않습니다.
+- 종목명/코드: 한투 공식 `https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip`의 `472150` 레코드 확인.
+- 기존 토큰 구조: `kinggall/domino` 커밋 `33c9b55a934f78c4920e09b8dff3d50d70392df3`.
+- API: `koreainvestment/open-trading-api` 커밋 `4a51f9126e719c352072b14b7df9222cb2691720`, `inquire_time_itemchartprice`, `inquire_investor_time_by_market`, `order_cash`, `inquire_daily_ccld` 공식 샘플.

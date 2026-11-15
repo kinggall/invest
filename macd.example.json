@@ -1,0 +1,12 @@
+{
+  "id": "tiger-macd-v1",
+  "mode": "macd",
+  "symbol": "472150",
+  "quantity": 1,
+  "fast": 12,
+  "slow": 26,
+  "signal": 9,
+  "max_notional": 100000,
+  "limit_offset_bps": 10,
+  "max_daily_buys": 10
+}

@@ -60,6 +60,17 @@ class DashboardTests(unittest.TestCase):
         restarted=d.Dashboard(self.app.home,self.app.state)
         self.assertFalse(restarted.enabled);self.assertEqual(restarted.strategy()['quantity'],2)
 
+    def test_legacy_price_settings_migrate_without_erasing_records(self):
+        with self.app.db() as db:
+            db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps({'id':'old','symbol':'005930','quantity':1}),))
+        restarted=d.Dashboard(self.app.home,self.app.state)
+        self.assertEqual(restarted.strategy()['symbol'],'472150')
+        self.assertEqual(restarted.strategy()['mode'],'macd')
+        with restarted.db() as db:
+            old=json.loads(db.execute('SELECT value FROM settings WHERE id=2').fetchone()[0])
+        self.assertEqual(old['symbol'],'005930')
+        self.assertFalse(restarted.enabled)
+
     def test_start_requires_existing_demo_token(self):
         with patch.object(d.SharedToken,'read',side_effect=TradingError('TOKEN_UNAVAILABLE')):
             self.assertEqual(self.request('/api/start',{})[0],400)

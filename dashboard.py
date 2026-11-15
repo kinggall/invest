@@ -9,9 +9,11 @@ from pathlib import Path
 import secrets
 import sqlite3
 import threading
+import time
 import webbrowser
 
-from trader import DemoClient, Engine, SharedToken, TradingError, validate_strategy, KST
+from trader import DemoClient, SharedToken, TradingError, KST
+from macd_strategy import MacdEngine, DEFAULT, validate
 
 
 class Dashboard:
@@ -23,10 +25,17 @@ class Dashboard:
         self.shutdown = threading.Event()
         self.last_message = '중지됨'
         self.last_check = None
+        self.snapshot = None
+        self.last_refresh = 0
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT)')
-            db.execute('INSERT OR IGNORE INTO settings VALUES (1, ?)', (json.dumps(dict(id='samsung-limit-v1',symbol='005930',side='buy',quantity=1,trigger_price=50000,limit_price=50000,max_notional=50000)),))
+            db.execute('INSERT OR IGNORE INTO settings VALUES (1, ?)', (json.dumps(DEFAULT),))
+        with self.db() as db:
+            previous = json.loads(db.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
+            if previous.get('mode') != 'macd':
+                db.execute('INSERT OR IGNORE INTO settings VALUES (2, ?)', (json.dumps(previous),))
+                db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(DEFAULT),))
         self.state.chmod(0o600)
 
     @contextmanager
@@ -47,7 +56,7 @@ class Dashboard:
         return DemoClient(self.home, os.environ.get('KIS_DEMO_CANO',''), os.environ.get('KIS_DEMO_PRODUCT','01'))
 
     def engine(self):
-        return Engine(self.state, self.client())
+        return MacdEngine(self.state, self.client())
 
     def status(self):
         with self.lock:
@@ -58,24 +67,27 @@ class Dashboard:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
             orders = []
+            signals = []
             try:
                 engine = self.engine()
                 try:
                     orders = [dict(row) for row in engine.db.execute('SELECT day,symbol,quantity,status,order_no,filled,strategy FROM orders WHERE scope=? ORDER BY rowid DESC LIMIT 100', (engine.scope,))]
+                    signals = [dict(row) for row in engine.db.execute('SELECT bar_time,side,status,value FROM signals WHERE scope=? ORDER BY bar_time DESC LIMIT 100', (engine.scope,))]
                 finally:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders,
+            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot,
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
         engine = self.engine()
         try:
-            result = engine.run(self.strategy(), execute)
-            fills = engine.sync()
+            result = engine.evaluate(self.strategy(), execute)
+            self.snapshot = result
+            self.last_refresh = time.monotonic()
             self.last_check = datetime.now(KST).isoformat(timespec='seconds')
-            self.last_message = json.dumps(dict(strategy=result, fills=fills), ensure_ascii=False)
+            self.last_message = json.dumps({key:result[key] for key in ('status','bars','required_bars','position','pending','submitted') if key in result}, ensure_ascii=False)
             return result
         finally:
             engine.db.close()
@@ -85,7 +97,7 @@ class Dashboard:
             if command == 'strategy':
                 if self.enabled:
                     raise TradingError('먼저 자동 실행을 중지하세요.')
-                strategy = validate_strategy(value)
+                strategy = validate(value)
                 with self.db() as db:
                     db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(strategy),))
                 self.last_message = '전략 저장됨'
@@ -94,9 +106,9 @@ class Dashboard:
             elif command == 'start':
                 SharedToken(self.home).read()
                 self.client()
-                validate_strategy(self.strategy())
+                validate(self.strategy())
                 self.enabled = True
-                self.last_message = '자동 실행 시작 · 10초 간격'
+                self.last_message = '자동 실행 시작 · 확정 3분봉 MACD 신호 평가 / 코스피 수급 60초 조회'
             elif command == 'stop':
                 self.enabled = False
                 self.last_message = '자동 실행 중지 · 기존 미체결 주문은 유지됩니다.'
@@ -113,13 +125,15 @@ class Dashboard:
     def worker(self):
         while not self.shutdown.wait(10):
             with self.lock:
-                if self.enabled:
+                if self.enabled or time.monotonic()-self.last_refresh >= 60:
                     try:
-                        self.tick(True)
+                        self.tick(self.enabled)
                     except TradingError as exc:
+                        self.last_refresh = time.monotonic()
                         self.enabled = False
                         self.last_message = str(exc) + ' · 자동 실행 중지'
                     except Exception:
+                        self.last_refresh = time.monotonic()
                         self.enabled = False
                         self.last_message = '처리 오류 · 자동 실행 중지'
 
