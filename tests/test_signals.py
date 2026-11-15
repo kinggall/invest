@@ -64,3 +64,30 @@ class VWAPTests(unittest.TestCase):
         points=session_vwap(rows,aggregate(rows,datetime(2026,11,16,9,6,tzinfo=KST)))
         self.assertEqual(len(points),1)
         self.assertIsNone(points[0]['vwap'])
+        self.assertGreater(points[0]['vwap_observed'],0)
+        self.assertEqual(points[0]['vwap_quality'],'partial')
+        self.assertEqual(points[0]['vwap_missing_times'],['09:00'])
+
+    def test_one_missing_minute_keeps_display_estimate_but_not_trading_reference(self):
+        from signals import session_vwap,vwap_entry
+        rows=self.rows()
+        extra=[dict(row,time=(datetime.fromisoformat(row['time'])+timedelta(minutes=6)).isoformat()) for row in rows]
+        raw=rows+extra
+        raw=[row for row in raw if row['time'][11:16]!='09:04']
+        points=session_vwap(raw,aggregate(raw,datetime(2026,11,16,9,12,tzinfo=KST)))
+        self.assertEqual(points[0]['vwap_quality'],'complete')
+        self.assertEqual(points[-1]['vwap_quality'],'partial')
+        self.assertIsNone(points[-1]['vwap'])
+        self.assertGreater(points[-1]['vwap_observed'],0)
+        self.assertEqual(points[-1]['vwap_missing_minutes'],1)
+        self.assertEqual(points[-1]['vwap_missing_times'],['09:04'])
+        self.assertFalse(vwap_entry(points[-1]))
+
+    def test_zero_volume_explains_why_no_line_is_available(self):
+        from signals import session_vwap
+        rows=self.rows()
+        for row in rows:row['volume']=0
+        points=session_vwap(rows,aggregate(rows,datetime(2026,11,16,9,6,tzinfo=KST)))
+        self.assertEqual(points[-1]['vwap_quality'],'no_volume')
+        self.assertEqual(points[-1]['vwap_cumulative_volume'],0)
+        self.assertIsNone(points[-1]['vwap_observed'])

@@ -1,5 +1,6 @@
 """Loopback-only demo trading dashboard. Credentials never reach the browser."""
 import argparse
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,9 +20,21 @@ from history import History
 from backtest import simulate
 
 
+API_VERSION = '2026-11-vwap2'
+
+
+def source_fingerprint():
+    root=Path(__file__).resolve().parent
+    digest=hashlib.sha256()
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py'):
+        digest.update((root/name).read_bytes())
+    return digest.hexdigest()
+
+
 class Dashboard:
     def __init__(self, home, state):
         self.home, self.state = Path(home), Path(state)
+        self.source_fingerprint=source_fingerprint()
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.io_lock = threading.Lock()
@@ -85,7 +98,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,enabled=self.enabled, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
@@ -105,7 +118,7 @@ class Dashboard:
 
     def may_submit(self):
         # Read atomic state without holding a lock across SQLite / network work.
-        return self.enabled and not self.shutdown.is_set()
+        return self.enabled and not self.shutdown.is_set() and source_fingerprint()==self.source_fingerprint
 
     def progress(self, job_id, message):
         with self.lock:

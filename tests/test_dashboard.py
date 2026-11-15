@@ -159,4 +159,14 @@ class DashboardTests(unittest.TestCase):
             self.app.lookup_thread.join(2)
         self.assertEqual(self.app.lookup_job['state'],'succeeded')
 
+    def test_api_version_and_updated_source_are_reported(self):
+        status=json.loads(self.request('/api/status')[1])
+        self.assertEqual(status['api_version'],'2026-11-vwap2')
+        self.assertFalse(status['restart_required'])
+        self.app.enabled=True
+        with patch.object(d,'source_fingerprint',return_value='changed-source'):
+            status=json.loads(self.request('/api/status')[1])
+            self.assertTrue(status['restart_required'])
+            self.assertFalse(self.app.may_submit())
+
 if __name__=='__main__':unittest.main()

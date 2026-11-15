@@ -81,12 +81,18 @@ def session_vwap(minutes, bars):
     expected = None
     for stamp, row in sorted(unique.items()):
         if stamp.date() != day:
+            missing = 0
+            missing_times = []
             day = stamp.date()
             total_value = total_volume = 0.0
             complete = True
             expected = stamp.replace(hour=9,minute=0,second=0,microsecond=0)
         if stamp != expected:
             complete = False
+            count=max(0,int((stamp-expected).total_seconds()//60))
+            missing+=count
+            for index in range(min(count,5-len(missing_times))):
+                missing_times.append((expected+timedelta(minutes=index)).strftime('%H:%M'))
         expected = stamp + timedelta(minutes=1)
         try:
             high,low,close,volume = (float(row[k]) for k in ('high','low','close','volume'))
@@ -96,17 +102,24 @@ def session_vwap(minutes, bars):
             raise TradingError('VWAP_INPUT_INVALID')
         total_value += ((high+low+close)/3)*volume
         total_volume += volume
-        cumulative[expected] = total_value/total_volume if complete and total_volume > 0 else None
+        observed=total_value/total_volume if total_volume>0 else None
+        cumulative[expected] = dict(value=observed if complete else None,observed=observed,
+            quality='no_volume' if observed is None else ('complete' if complete else 'partial'),
+            missing=missing,missing_times=list(missing_times),volume=total_volume)
     result = []
     previous = None
     previous_day = None
     for bar in bars:
         end = datetime.fromisoformat(bar['end']).astimezone(KST)
-        value = cumulative.get(end)
+        state=cumulative.get(end,{})
+        value = state.get('value')
         if end.date() != previous_day:
             previous = None
         change = value-previous if value is not None and previous is not None else None
         result.append(dict(bar,vwap=value,vwap_change=change,
+            vwap_observed=state.get('observed'),vwap_quality=state.get('quality','missing'),
+            vwap_missing_minutes=state.get('missing',0),vwap_missing_times=state.get('missing_times',[]),
+            vwap_cumulative_volume=state.get('volume',0),
             vwap_distance_pct=(bar['close']/value-1)*100 if value else None,
             vwap_source='당일 1분봉 HLC3×거래량 근사 · 09:00 초기화'))
         previous,previous_day = value,end.date()
