@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from oi import OIService,candidates,monthly_expiry,nearest_month,parse_index_master
+from oi import OIService,candidates,monthly_expiry,nearest_month,parse_index_master,parse_future_master
 from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,OI_PRICE,ORDER,REAL_BASE,transport
 
 class Quotes:
@@ -105,10 +105,43 @@ class OITests(unittest.TestCase):
 
     def test_missing_futures_preserves_index_strikes_without_projection(self):
         self.quotes.no_future=True
-        result=self.collect()
+        with patch('oi.load_future_master',side_effect=TradingError('OI_MASTER_UNAVAILABLE')):
+            result=self.collect()
         self.assertEqual(result['put_wall']['strike'],97.5)
         self.assertIsNone(result['put_wall']['projected_future_level'])
         self.assertIsNone(result['future'])
+
+    def test_official_future_master_rejects_mini_spreads_and_other_indices(self):
+        text='\n'.join(['1|A01612|KRX|F 202612| |0|1|2001|KOSPI200','1|A01703|KRX|F 202703| |0|1|2001|KOSPI200','B|A05612|KRX|미니F 202612| |0|1|2001|KOSPI200','2|D0161201|KRX|SP 2612-2703| |0|1|2001|KOSPI200','3|A06612|KRX|코스닥150F 202612| |0|1|3003|KSQ150'])
+        self.assertEqual([r['code'] for r in parse_future_master(text)],['A01612','A01703'])
+
+    def test_board_missing_uses_exact_official_front_future_read_only_quote(self):
+        self.quotes.no_future=True
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_PRICE:
+                self.assertEqual(params,dict(FID_COND_MRKT_DIV_CODE='F',FID_INPUT_ISCD='A01612'))
+                self.assertFalse(post)
+                return dict(output1=dict(futs_prpr='102',hts_rmnn_dynu='23',acml_vol='100'))
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        with patch('oi.load_future_master',return_value=[dict(code='A01612',expiry='202612',name='F 202612')]):
+            result=self.collect()
+        self.assertEqual(result['future']['code'],'A01612')
+        self.assertEqual(result['basis'],2)
+        self.assertEqual(result['put_wall']['projected_future_level'],99.5)
+        self.assertEqual(result['history'][0]['future_price'],102)
+
+    def test_front_future_zero_quote_does_not_create_a_basis(self):
+        self.quotes.no_future=True
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_PRICE:return dict(output1=dict(futs_prpr='0'))
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        with patch('oi.load_future_master',return_value=[dict(code='A01612',expiry='202612',name='F 202612')]):
+            result=self.collect()
+        self.assertIsNone(result['future']);self.assertIsNone(result['basis'])
 
     def test_candidates_exclude_atm_wrong_side_zero_and_far_away(self):
         rows=[{'strike':k,'oi':v} for k,v in [(90,9999),(95,0),(97.5,10),(100,99999),(102.5,88888)]]

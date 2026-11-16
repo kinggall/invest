@@ -30,6 +30,23 @@ def parse_index_master(text):
     return result
 
 
+
+def parse_future_master(text):
+    result=[]
+    for line in text.splitlines():
+        cols=[c.strip() for c in line.split('|')]
+        if len(cols)!=9 or cols[0]!='1' or cols[7]!='2001':continue
+        match=re.fullmatch(r'F\s+(20\d{2}(?:0[1-9]|1[0-2]))',cols[3])
+        if match and re.fullmatch(r'(?:A01|101)[A-Z0-9]{3}',cols[1]):
+            result.append(dict(code=cols[1],name=cols[3],expiry=match[1]))
+    return sorted(result,key=lambda r:(r['expiry'],r['code']))
+
+
+def load_future_master(day):
+    load_index_master(day)
+    return _MASTER_CACHE[2]
+
+
 def load_index_master(day):
     """Public official product metadata only; no credentials or token headers."""
     global _MASTER_CACHE
@@ -41,10 +58,12 @@ def load_index_master(day):
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             info=archive.getinfo('fo_idx_code_mts.mst')
             if info.file_size>8*1024*1024:raise ValueError('size')
-            result=parse_index_master(archive.read(info).decode('cp949'))
+            text=archive.read(info).decode('cp949')
+            result=parse_index_master(text)
+            futures=parse_future_master(text)
     except TradingError:raise
     except Exception:raise TradingError('OI_MASTER_UNAVAILABLE') from None
-    _MASTER_CACHE=(day,result)
+    _MASTER_CACHE=(day,result,futures)
     return result
 
 
@@ -206,6 +225,22 @@ class OIService:
             if not choices:raise TradingError('OI_KOSPI200_FUTURE_MISSING')
             future=sorted(choices,key=lambda r:(-(r['volume'] or 0),r['remaining_days'] if r['remaining_days'] is not None else 9999,r['code']))[0]
         except TradingError as exc:warnings.append(str(exc))
+        if future is None:
+            try:
+                contracts=[r for r in load_future_master(now.date().isoformat()) if r['expiry']>=nearest_month(now)]
+                if not contracts:raise TradingError('OI_FUTURE_MASTER_MISSING')
+                contract=contracts[0]
+                self.progress(contract['code']+' · 공식 최근월물 선물 현재가 직접 조회 중…')
+                quoted=self.query(OI_PRICE,dict(FID_COND_MRKT_DIV_CODE='F',FID_INPUT_ISCD=contract['code'])).get('output1')
+                if not isinstance(quoted,dict):raise TradingError('OI_FUTURE_QUOTE_INVALID')
+                price=number(quoted.get('futs_prpr'),'FUTURE_PRICE')
+                days=number(quoted.get('hts_rmnn_dynu'),'REMAINING_DAYS',True,True,True)
+                if price<=0 or days is not None and days<0:raise TradingError('OI_FUTURE_PRICE_MISSING')
+                future=dict(code=contract['code'],name=contract['name'],price=price,
+                    volume=number(quoted.get('acml_vol'),'FUTURE_VOLUME',True,True),remaining_days=days,
+                    oi=number(quoted.get('hts_otst_stpl_qty'),'FUTURE_OI',True,True),source='공식 최근월물 · 개별 조회')
+                warnings.append('선물 전광판에서 표준선물을 확인하지 못해 공식 종목 파일의 최근월물 '+contract['code']+' 현재가를 직접 수신했습니다.')
+            except TradingError as exc:warnings.append(str(exc)+' · 선물 현재가 직접 조회도 확인되지 않았습니다.')
         # Board responses can stop before ATM because each side is capped at 100.
         # Get missing contracts from the official same-month master, never infer OI.
         coverage_complete=None;individual_count=0
