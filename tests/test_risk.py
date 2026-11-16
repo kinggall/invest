@@ -106,7 +106,7 @@ class RiskTests(unittest.TestCase):
             ('other',self.engine.scope,'20261116','005930',1,cfg,'SUBMITTED','other','001',0))
         original=self.broker.fills
         def checked(row):
-            if row['symbol']!='472150':raise AssertionError('Unrelated symbol queried')
+            if row['symbol']!='069500':raise AssertionError('Unrelated symbol queried')
             return original(row)
         self.broker.fills=checked
         self.assertTrue(self.check()['submitted'])

@@ -8,9 +8,8 @@ from market import MarketData
 from signals import aggregate, macd, session_vwap, vwap_entry
 from risk import RiskManager, stop_percent
 
-SYMBOL = '472150'
-NAME = 'TIGER 배당커버드콜액티브'
-DEFAULT = dict(id='tiger-macd-v1', mode='macd', symbol=SYMBOL, quantity=1, fast=12, slow=26,
+from instruments import TRADE_SYMBOL as SYMBOL, TRADE_NAME as NAME
+DEFAULT = dict(id='kodex-macd-v1', mode='macd', symbol=SYMBOL, quantity=1, fast=12, slow=26,
                signal=9, max_notional=100000, limit_offset_bps=10, max_daily_buys=10, vwap_filter=False, stop_loss_enabled=False, stop_loss_pct=1.0)
 
 
@@ -70,7 +69,7 @@ class MacdEngine(Engine):
         points=macd(bars,cfg['fast'],cfg['slow'],cfg['signal'])
         needed=cfg['slow']+cfg['signal']
         last=points[-1] if points else None
-        snapshot=dict(status='WARMUP', symbol=SYMBOL,name=NAME,position=position,pending=pending,
+        snapshot=dict(status='WARMUP', observed_at=now.isoformat(),symbol=SYMBOL,name=NAME,position=position,pending=pending,
             flow=flow,chart=points[-120:],bars=len(bars),required_bars=needed,fills=fills,submitted=False)
         if self.risk.latched():
             snapshot['status']='RISK_HALTED'

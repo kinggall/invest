@@ -15,19 +15,21 @@ import webbrowser
 
 from trader import DemoClient, SharedToken, TradingError, KST
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
+from instruments import PREVIOUS_SYMBOL
+from confirmation import assess
 from signals import macd
 from history import History
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-oi9'
+API_VERSION = '2026-11-kodex1'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -60,12 +62,15 @@ class Dashboard:
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS confirmation_samples (id TEXT PRIMARY KEY, stamp TEXT, payload TEXT)')
             db.execute('INSERT OR IGNORE INTO settings VALUES (1, ?)', (json.dumps(DEFAULT),))
         with self.db() as db:
             previous = json.loads(db.execute('SELECT value FROM settings WHERE id=1').fetchone()[0])
-            if previous.get('mode') != 'macd':
-                db.execute('INSERT OR IGNORE INTO settings VALUES (2, ?)', (json.dumps(previous),))
+            if previous.get('mode') != 'macd' or previous.get('symbol') != SYMBOL:
+                backup_id=4 if previous.get('symbol')==PREVIOUS_SYMBOL else 2
+                db.execute('INSERT OR IGNORE INTO settings VALUES (?, ?)', (backup_id,json.dumps(previous)))
                 db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(DEFAULT),))
+                self.last_message='매매 종목을 KODEX 200(069500)으로 전환했습니다. 이전 설정과 주문 기록은 보존했습니다. 새 설정을 확인하고 저장하세요.'
         with self.db() as db:
             saved=db.execute('SELECT value FROM settings WHERE id=3').fetchone()
         self.oi_config=oi_settings(json.loads(saved[0])) if saved else dict(expiry='',radius_pct=5)
@@ -91,6 +96,15 @@ class Dashboard:
     def engine(self):
         return MacdEngine(self.state, self.client())
 
+    @staticmethod
+    def previous_exposure(engine):
+        quantity=0;pending=0
+        for row in engine.db.execute('SELECT filled,status,strategy FROM orders WHERE scope=? AND symbol=?',(engine.scope,PREVIOUS_SYMBOL)):
+            side=json.loads(row['strategy']).get('side')
+            quantity+=row['filled']*(1 if side=='buy' else -1 if side=='sell' else 0)
+            pending+=row['status'] in ('UNKNOWN','SUBMITTED','PARTIAL')
+        return dict(symbol=PREVIOUS_SYMBOL,quantity=quantity,pending=pending)
+
     def status(self):
         with self.lock:
             try:
@@ -110,8 +124,18 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
+
+    def record_confirmation(self):
+        with self.lock:
+            snapshot=self.snapshot or {};oi=self.oi_snapshot or {}
+            value=assess(snapshot,oi)
+            chart=snapshot.get('chart') or []
+            signature=[SYMBOL,chart[-1].get('end') if chart else None,(snapshot.get('flow') or {}).get('observed_at'),oi.get('observed_at')]
+        key=hashlib.sha256(json.dumps(signature).encode()).hexdigest()
+        with self.db() as db:
+            db.execute('INSERT OR IGNORE INTO confirmation_samples VALUES (?,?,?)',(key,value['observed_at'],json.dumps(value,ensure_ascii=False)))
 
     def tick(self, execute):
         with self.lock:
@@ -124,6 +148,7 @@ class Dashboard:
                 self.last_refresh = time.monotonic()
                 self.last_check = datetime.now(KST).isoformat(timespec='seconds')
                 self.last_message = json.dumps({key:result[key] for key in ('status','bars','required_bars','position','pending','submitted') if key in result}, ensure_ascii=False)
+            self.record_confirmation()
             return result
         finally:
             engine.db.close()
@@ -176,6 +201,7 @@ class Dashboard:
                     message=('OI 분할 갱신 · 최근 10분 근방 수신 '+str(sampling['fresh'])+'/'+str(sampling['total'])+'종목' if sampling.get('mode')=='incremental' else 'OI 조회 완료')
                     if partial:message+=' · 일부 수신, 임시 후보'
                     self.oi_job=dict(state='succeeded',message=message+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
+                self.record_confirmation()
         except Exception as exc:
             with self.lock:
                 self.oi_active=False;self.last_oi=time.monotonic()
@@ -310,6 +336,9 @@ class Dashboard:
                 engine=self.engine()
                 resume_exit=False
                 try:
+                    old_position=self.previous_exposure(engine)
+                    if old_position['quantity'] or old_position['pending']:
+                        raise TradingError('이전 472150의 보유/미확인 주문이 남아 있습니다. 체결 조회와 기존 주문·보유 정리를 확인한 뒤 새 종목 자동 실행을 시작하세요. [PREVIOUS_ETF_REVIEW_REQUIRED]')
                     if engine.risk.latched():
                         details=engine.risk.position()
                         if details['quantity'] or details['pending']:

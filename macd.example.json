@@ -1,7 +1,7 @@
 {
-  "id": "tiger-macd-v1",
+  "id": "kodex-macd-v1",
   "mode": "macd",
-  "symbol": "472150",
+  "symbol": "069500",
   "quantity": 1,
   "fast": 12,
   "slow": 26,

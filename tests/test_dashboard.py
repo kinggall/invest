@@ -65,12 +65,47 @@ class DashboardTests(unittest.TestCase):
         with self.app.db() as db:
             db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps({'id':'old','symbol':'005930','quantity':1}),))
         restarted=d.Dashboard(self.app.home,self.app.state)
-        self.assertEqual(restarted.strategy()['symbol'],'472150')
+        self.assertEqual(restarted.strategy()['symbol'],'069500')
         self.assertEqual(restarted.strategy()['mode'],'macd')
         with restarted.db() as db:
             old=json.loads(db.execute('SELECT value FROM settings WHERE id=2').fetchone()[0])
         self.assertEqual(old['symbol'],'005930')
         self.assertFalse(restarted.enabled)
+
+    def test_previous_etf_settings_are_archived_and_orders_preserved(self):
+        from macd_strategy import MacdEngine
+        broker=Mock();broker.account={'CANO':'12345678','ACNT_PRDT_CD':'01'}
+        engine=MacdEngine(self.app.state,broker)
+        try:
+            order=dict(id='old',symbol='472150',side='buy',quantity=2,limit_price=15000)
+            engine.db.execute('INSERT INTO orders(run_id,scope,day,symbol,quantity,strategy,status,filled) VALUES (?,?,?,?,?,?,?,?)',
+                ('old',engine.scope,'20261116','472150',2,json.dumps(order),'FILLED',2))
+            with self.app.db() as db:
+                previous=dict(self.app.strategy(),symbol='472150',id='tiger-macd-v1')
+                db.execute('UPDATE settings SET value=? WHERE id=1',(json.dumps(previous),))
+            restarted=d.Dashboard(self.app.home,self.app.state)
+            self.assertEqual(restarted.strategy()['symbol'],'069500')
+            self.assertFalse(restarted.enabled)
+            with restarted.db() as db:
+                self.assertEqual(json.loads(db.execute('SELECT value FROM settings WHERE id=4').fetchone()[0]),previous)
+            self.assertEqual(restarted.previous_exposure(engine)['quantity'],2)
+            with patch.object(d,'SharedToken'),patch.object(restarted,'client',return_value=broker),patch.object(restarted,'engine',return_value=engine):
+                with self.assertRaisesRegex(TradingError,'PREVIOUS_ETF_REVIEW_REQUIRED'):restarted.action('start',{})
+            self.assertFalse(restarted.enabled)
+            broker.order.assert_not_called()
+        finally:engine.db.close()
+
+    def test_confirmation_is_read_only_and_records_sources_without_duplicates(self):
+        self.app.snapshot=dict(symbol='069500',chart=[],flow={})
+        self.app.record_confirmation();self.app.record_confirmation()
+        with self.app.db() as db:
+            rows=db.execute('SELECT payload FROM confirmation_samples').fetchall()
+        self.assertEqual(len(rows),1)
+        value=json.loads(rows[0][0])
+        self.assertEqual(value['symbol'],'069500')
+        self.assertEqual(value['execution'],'OBSERVE_ONLY')
+        self.assertFalse(self.app.enabled)
+        self.assertFalse(self.app.risk_active)
 
     def test_historical_chart_is_read_only_and_does_not_change_strategy(self):
         before=self.app.strategy()
@@ -161,7 +196,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-oi9')
+        self.assertEqual(status['api_version'],'2026-11-kodex1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

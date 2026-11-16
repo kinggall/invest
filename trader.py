@@ -1,4 +1,5 @@
 """invest: standalone KIS demo trader; never issues or writes shared tokens."""
+from instruments import TRADE_SYMBOL
 import argparse
 from datetime import datetime, timezone, timedelta
 import hashlib
@@ -233,7 +234,7 @@ class DemoClient:
 
     def order(self, strategy):
         market=strategy.get('order_type','limit')=='market'
-        if market and (strategy.get('side')!='sell' or strategy.get('mode')!='risk_stop' or strategy.get('symbol')!='472150'):
+        if market and (strategy.get('side')!='sell' or strategy.get('mode')!='risk_stop' or strategy.get('symbol')!=TRADE_SYMBOL):
             raise TradingError('MARKET_ORDER_RESTRICTED_TO_PROTECTIVE_EXIT')
         payload = dict(self.account, PDNO=strategy['symbol'], ORD_DVSN='01' if market else '00', ORD_QTY=str(strategy['quantity']),
                        ORD_UNPR='0' if market else str(strategy['limit_price']), EXCG_ID_DVSN_CD='KRX',
