@@ -194,6 +194,47 @@ class DashboardTests(unittest.TestCase):
             self.app.lookup_thread.join(2)
         self.assertEqual(self.app.lookup_job['state'],'succeeded')
 
+    def test_wall_simulator_starts_without_enabling_broker_orders(self):
+        self.app.oi_active=True
+        with patch.object(d,'SharedToken'),patch.object(self.app,'client'):
+            self.app.action('wall_start',{})
+        self.assertTrue(self.app.wall_enabled)
+        self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
+        self.app.action('wall_stop',{})
+        self.assertFalse(self.app.wall_enabled)
+        restarted=d.Dashboard(self.app.home,self.app.state)
+        self.assertFalse(restarted.wall_enabled)
+        self.assertEqual(restarted.wall_status()['state']['capital'],10000000)
+
+    def test_wall_start_does_not_double_start_an_oi_lookup_already_running(self):
+        self.app.oi_job['state']='running'
+        with patch.object(d,'SharedToken'),patch.object(self.app,'client'),patch.object(self.app,'request_oi') as request:
+            self.app.action('wall_start',{})
+        self.assertTrue(self.app.oi_active);self.assertTrue(self.app.wall_enabled)
+        request.assert_not_called()
+
+    def test_wall_and_macd_order_execution_are_mutually_exclusive(self):
+        self.app.wall_enabled=True
+        with patch.object(d,'SharedToken') as token:
+            with self.assertRaises(TradingError):self.app.action('start',{})
+            token.assert_not_called()
+        self.app.wall_enabled=False;self.app.enabled=True
+        with self.assertRaises(TradingError):self.app.action('wall_start',{})
+
+    def test_wall_stop_during_quote_io_prevents_paper_fills(self):
+        from datetime import datetime
+        from trader import KST
+        self.app.wall_enabled=True
+        client=Mock()
+        def quote(symbol):
+            self.assertEqual(symbol,'069500');self.app.wall_enabled=False;return 10000
+        client.quote.side_effect=quote
+        with patch.object(d,'datetime') as clock,patch.object(d,'WallPaper') as paper:
+            clock.now.return_value=datetime(2026,11,16,10,30,tzinfo=KST)
+            self.app.wall_tick({},client)
+        paper.return_value.step.assert_not_called()
+        client.order.assert_not_called()
+
     def test_futures_quote_worker_is_independent_of_trading_and_oi(self):
         snapshot=dict(session=dict(id='night:2026-11-16',mode='night'),bars=[])
         service=Mock();service.collect.return_value=snapshot
@@ -215,7 +256,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-futures1')
+        self.assertEqual(status['api_version'],'2026-11-wall1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

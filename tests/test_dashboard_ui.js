@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('strategyForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type=match[0].match(/type="([^"]+)"/)?.[1]||'text';field.checked=false;fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-futures1',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'kodex-macd-v1',symbol:'069500',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
+let status={api_version:'2026-11-wall1',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'kodex-macd-v1',symbol:'069500',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
 const requests=[];class FormDataMock {constructor(form){this.entries=[...form.elements].filter(e=>e.type!=='checkbox'||e.checked).map(e=>[e.name,e.value])}[Symbol.iterator](){return this.entries[Symbol.iterator]()}}
 const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0,console,fetch:async(url,options)=>{
  if(options?.body)requests.push(JSON.parse(options.body));
@@ -130,6 +130,15 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  status={...status,future_job:{state:'succeeded',message:'야간 선물 조회 완료'},future_context:{...nightContext,scheduled_open:false}};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('futureMeta').textContent,/거래시간 종료/);
+ status={...status,enabled:false,risk_active:false,wall_paper:{enabled:true,message:'풋월 반등 가상 진입',quantity:40,average_entry:10005,equity:9999000,net_pnl:-1000,state:{run_id:'paper-test',updated_at:'2026-11-17T10:33:10+09:00',capital:10000000,cash:9598800,realized:0,fees:60,status:'ENTERED',position:{put:775,call:800,target1:790,target2:795,put_stop:772.675,stop_price:9904.95,breakout_count:0,added:false}},events:[{time:'2026-11-17T10:33:10+09:00',side:'buy',quantity:40,price:10005,reference_price:10000,fee:60,realized:0,reason:'REBOUND_ENTRY'}]}};
+ await vm.runInContext('refresh()',context);
+ assert.equal(elements.get('wallStart').disabled,true);
+ assert.equal(elements.get('wallStop').disabled,false);
+ assert.match(elements.get('wallRunning').textContent,/주문전송 없음/);
+ assert.match(elements.get('wallBox').textContent,/790/);
+ assert.match(elements.get('wallQuantity').textContent,/40주/);
+ assert.equal(elements.get('wallTrades').children.length,1);
+ assert.match(elements.get('wallTrades').children[0].children[1].textContent,/풋월 반등/);
  const partial={...point,vwap:null,vwap_observed:14999,vwap_quality:'partial',vwap_missing_minutes:1,vwap_missing_times:['09:04']};
  status={...status,history:{...status.history,chart:[partial]}};
  await vm.runInContext('refresh()',context);
@@ -143,7 +152,7 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  const before=requests.length;
  await vm.runInContext("action('backtest',{date:'2026-11-13'})",context);
  assert.equal(requests.length,before);
- status={...status,api_version:'2026-11-futures1',restart_required:true};
+ status={...status,api_version:'2026-11-wall1',restart_required:true};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('historyFeedback').textContent,/업데이트한 Python/);
  console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards and protective-stop controls and OI observer render passed.');

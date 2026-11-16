@@ -36,7 +36,7 @@ def assess(snapshot=None,oi=None,now=None):
         improving=last['histogram']>previous['histogram']
         above=last['macd']>last['signal']
         state='상향 교차' if last.get('cross')=='buy' else '하향 교차' if last.get('cross')=='sell' else '상방 우위' if above else '하방 우위'
-        result['macd']=dict(state=state,improving=improving,above_signal=above,histogram=last['histogram'],previous_histogram=previous['histogram'],bar_end=last['end'])
+        result['macd']=dict(periods=snapshot.get('periods'),state=state,improving=improving,above_signal=above,histogram=last['histogram'],previous_histogram=previous['histogram'],bar_end=last['end'])
     else:result['reasons'].append('ETF MACD 준비/최신 확정봉 확인 필요')
     if source_ok and numeric(last.get('vwap')) and last['vwap']>0 and numeric(last.get('close')) and numeric(last.get('vwap_change')):
         above=last['close']>last['vwap'];rising=last['vwap_change']>0

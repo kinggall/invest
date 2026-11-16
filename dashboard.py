@@ -18,19 +18,20 @@ from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from instruments import PREVIOUS_SYMBOL
 from confirmation import assess
 from futures_chart import FuturesChart, session_at
+from wall_paper import WallPaper
 from signals import macd
 from history import History
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-futures1'
+API_VERSION = '2026-11-wall1'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -52,6 +53,9 @@ class Dashboard:
         self.future_job=dict(state='idle',message='선물 주간/야간 실제 분봉 조회 대기')
         self.last_future=0
         self.future_thread=None
+        self.wall_enabled=False
+        self.wall_exit_requested=False
+        self.wall_message='가상 시뮬레이션 중지 · 주문전송 없음'
         self.enabled = False
         self.risk_active = False
         self.risk_snapshot = dict(status='DISARMED',message='손절 감시 중지')
@@ -79,6 +83,7 @@ class Dashboard:
         with self.db() as db:
             saved=db.execute('SELECT value FROM settings WHERE id=3').fetchone()
         self.oi_config=oi_settings(json.loads(saved[0])) if saved else dict(expiry='',radius_pct=5)
+        paper=WallPaper(self.state);paper.close()
         self.state.chmod(0o600)
 
     @contextmanager
@@ -110,6 +115,37 @@ class Dashboard:
             pending+=row['status'] in ('UNKNOWN','SUBMITTED','PARTIAL')
         return dict(symbol=PREVIOUS_SYMBOL,quantity=quantity,pending=pending)
 
+    def wall_status(self):
+        paper=WallPaper(self.state)
+        try:return dict(paper.view(),enabled=self.wall_enabled,exit_requested=self.wall_exit_requested,message=self.wall_message)
+        finally:paper.close()
+
+    def wall_tick(self,snapshot,client):
+        if source_fingerprint()!=self.source_fingerprint:
+            with self.lock:
+                self.wall_enabled=False;self.wall_exit_requested=False
+                self.wall_message='코드 갱신 감지 · 가상 시뮬레이션 중지, 서버를 재시작하세요.'
+            return
+        with self.lock:active=self.wall_enabled;exit_requested=self.wall_exit_requested
+        if not active and not exit_requested:return
+        quote={}
+        now=datetime.now(KST)
+        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):
+            price=client.quote(SYMBOL)
+            quote=dict(price=price,observed_at=datetime.now(KST).isoformat())
+        paper=WallPaper(self.state)
+        try:
+            with self.lock:
+                # Stop is checked again after network I/O. A stopped simulator fills nothing.
+                if not self.wall_enabled and not self.wall_exit_requested:return
+                if source_fingerprint()!=self.source_fingerprint:
+                    self.wall_enabled=False;self.wall_exit_requested=False;self.wall_message='코드 갱신 감지 · 서버 재시작 필요';return
+                result=paper.step(snapshot,self.oi_snapshot,quote,force_exit=self.wall_exit_requested)
+                self.wall_message=result['state']['message']
+                if self.wall_exit_requested and not result['quantity']:
+                    self.wall_exit_requested=False;self.wall_enabled=False
+        finally:paper.close()
+
     def status(self):
         with self.lock:
             try:
@@ -129,7 +165,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -154,6 +190,7 @@ class Dashboard:
                 self.last_check = datetime.now(KST).isoformat(timespec='seconds')
                 self.last_message = json.dumps({key:result[key] for key in ('status','bars','required_bars','position','pending','submitted') if key in result}, ensure_ascii=False)
             self.record_confirmation()
+            self.wall_tick(result,engine.client)
             return result
         finally:
             engine.db.close()
@@ -348,9 +385,31 @@ class Dashboard:
             elif command=='oi_stop':
                 self.oi_active=False
                 self.oi_job['message']='OI 자동 기록 중지 · 진행 중인 조회는 완료될 수 있습니다.'
+            elif command=='wall_start':
+                if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문과 손절 감시를 중지한 뒤 가상 시뮬레이션을 시작하세요.')
+                SharedToken(self.home).read();self.client()
+                if not self.oi_active:
+                    if self.oi_job['state']=='running':self.oi_active=True
+                    else:self.request_oi(self.oi_config,True)
+                self.wall_enabled=True;self.wall_exit_requested=False
+                self.wall_message='가상 시뮬레이션 시작 · OI/ETF 자료 준비 후 조건 평가 · 주문전송 없음'
+                self.last_refresh=0
+            elif command=='wall_stop':
+                self.wall_enabled=False;self.wall_exit_requested=False
+                self.wall_message='시뮬레이션 일시중지 · 가상 보유 유지 · 가상 손절/청산도 중지됨'
+            elif command=='wall_reset':
+                if self.wall_enabled or self.wall_exit_requested:raise TradingError('시뮬레이션을 먼저 중지하세요.')
+                paper=WallPaper(self.state)
+                try:paper.reset(value.get('capital',10000000))
+                finally:paper.close()
+                self.wall_message='새 가상 자금 설정됨 · 이전 거래 기록은 보존됨'
+            elif command=='wall_close':
+                if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문을 먼저 중지하세요.')
+                self.wall_exit_requested=True;self.last_refresh=0
+                self.wall_message='가상 전량청산 요청 · 다음 유효 장중 시세까지 대기'
             elif command == 'strategy':
-                if self.enabled or self.risk_active:
-                    raise TradingError('먼저 자동 실행과 손절 감시를 중지하세요.')
+                if self.enabled or self.risk_active or self.wall_enabled or self.wall_exit_requested:
+                    raise TradingError('먼저 자동 실행·손절 감시·가상 시뮬레이션을 중지하세요.')
                 strategy = validate(value)
                 with self.db() as db:
                     db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(strategy),))
@@ -368,6 +427,7 @@ class Dashboard:
                 self.lookup_thread=threading.Thread(target=self.run_lookup,args=(job_id,command,dict(value),cfg),daemon=True)
                 self.lookup_thread.start()
             elif command == 'start':
+                if self.wall_enabled or self.wall_exit_requested:raise TradingError('가상 OI 시뮬레이션을 먼저 중지하세요. 두 전략은 함께 실행하지 않습니다.')
                 SharedToken(self.home).read()
                 self.client()
                 cfg=validate(self.strategy())
@@ -400,7 +460,8 @@ class Dashboard:
         while not self.shutdown.wait(10):
             with self.lock:
                 execute=self.enabled
-                due=execute or time.monotonic()-self.last_refresh>=60
+                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
+                due=execute or wall_due or time.monotonic()-self.last_refresh>=60
                 lookup_running=self.lookup_job['state']=='running'
             if not due or lookup_running or not self.io_lock.acquire(blocking=False):
                 continue
@@ -411,6 +472,7 @@ class Dashboard:
                     self.last_refresh=time.monotonic()
                     self.enabled=False
                     self.last_message=self.lookup_error(exc)+' · 자동 실행 중지'
+                    if self.wall_enabled or self.wall_exit_requested:self.wall_message=self.lookup_error(exc)+' · 가상 체결 보류, 다음 조회 재시도'
             finally:
                 self.io_lock.release()
 

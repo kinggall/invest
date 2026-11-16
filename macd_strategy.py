@@ -58,6 +58,7 @@ class MacdEngine(Engine):
         position,pending=self.position()
         flow=self.market.flow(SYMBOL,now)
         minutes=self.market.minutes(SYMBOL,now)
+        latest=max((r for r in minutes if datetime.fromisoformat(r['time'])<=now),key=lambda r:r['time'],default=None)
         bars=session_vwap(minutes,aggregate(minutes,now))
         # Reset warm-up after missing intraday bars instead of silently bridging a data hole.
         for index in range(len(bars)-1,0,-1):
@@ -69,8 +70,8 @@ class MacdEngine(Engine):
         points=macd(bars,cfg['fast'],cfg['slow'],cfg['signal'])
         needed=cfg['slow']+cfg['signal']
         last=points[-1] if points else None
-        snapshot=dict(status='WARMUP', observed_at=now.isoformat(),symbol=SYMBOL,name=NAME,position=position,pending=pending,
-            flow=flow,chart=points[-120:],bars=len(bars),required_bars=needed,fills=fills,submitted=False)
+        snapshot=dict(status='WARMUP', periods=[cfg['fast'],cfg['slow'],cfg['signal']],observed_at=now.isoformat(),symbol=SYMBOL,name=NAME,position=position,pending=pending,
+            price_time=latest['time'] if latest else None,flow=flow,chart=points[-120:],bars=len(bars),required_bars=needed,fills=fills,submitted=False)
         if self.risk.latched():
             snapshot['status']='RISK_HALTED'
             return snapshot
