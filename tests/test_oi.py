@@ -5,8 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from oi import OIService,candidates,monthly_expiry,nearest_month
-from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,ORDER,REAL_BASE,transport
+from oi import OIService,candidates,monthly_expiry,nearest_month,parse_index_master
+from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,OI_PRICE,ORDER,REAL_BASE,transport
 
 class Quotes:
     def __init__(self):self.calls=[];self.extra=0;self.no_spot=False;self.no_future=False
@@ -114,6 +114,62 @@ class OITests(unittest.TestCase):
         rows=[{'strike':k,'oi':v} for k,v in [(90,9999),(95,0),(97.5,10),(100,99999),(102.5,88888)]]
         self.assertEqual([r['strike'] for r in candidates(rows,100,'put',5,None)],[97.5])
 
+    def test_current_master_codes_keep_standard_futures_only(self):
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_FUTURES:
+                return dict(output=[dict(futs_shrn_iscd=code,hts_kor_isnm='선물',futs_prpr='102',acml_vol=volume) for code,volume in [('A01612  ','100'),('A05612','99999'),('D0161201','99999'),('A06612','99999')]])
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        result=self.collect()
+        self.assertEqual(result['future']['code'],'A01612')
+        self.assertEqual(result['basis'],2)
+
+    def test_master_parser_excludes_weekly_mini_and_other_indices(self):
+        text='\n'.join([
+            '5|B01612790|KRX|C 202612   790.0|2|00790.00| |2001|KOSPI200',
+            '6|C01612790|KRX|P 202612   790.0|2|00790.00| |2001|KOSPI200',
+            'D|B05612790|KRX|미니C 202612   790.0|2|00790.00| |2001|KOSPI200',
+            'L|B09FLW790|KRX|위클리C 2611W3   790.0|2|00790.00| |2001|KOSPI200',
+            '5|B01612790|KRX|C 202612   790.0|2|00790.00| |3003|KSQ150'])
+        rows=parse_index_master(text)
+        self.assertEqual(len(rows),2)
+        self.assertEqual({r['side'] for r in rows},{'call','put'})
+        self.assertTrue(all(r['expiry']=='202612' and r['strike']==790 for r in rows))
+
+    def configure_truncated_board(self,fail=False):
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_OPTIONS:
+                return dict(output1=[dict(acpr='10',hts_otst_stpl_qty='500',optn_shrn_iscd='farcall')],output2=[dict(acpr='10',hts_otst_stpl_qty='500',optn_shrn_iscd='farput')])
+            if path==OI_PRICE:
+                self.quotes.calls.append((path,tr,params,post))
+                if fail:raise TradingError('OI_QUOTE_REJECTED')
+                strike=102.5 if params['FID_INPUT_ISCD'].startswith('B') else 97.5
+                return dict(output1=dict(hts_otst_stpl_qty='456',otst_stpl_qty_icdc='-10',acml_vol='21'),output2=dict(acpr=str(strike)))
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        return [dict(side='call',code='B01612102',expiry='202612',strike=102.5),dict(side='put',code='C01612097',expiry='202612',strike=97.5)]
+
+    def test_truncated_board_gets_nearby_oi_by_verified_monthly_contract(self):
+        master=self.configure_truncated_board()
+        with patch('oi.load_index_master',return_value=master):result=self.collect()
+        self.assertEqual(result['put_wall']['oi'],456)
+        self.assertEqual(result['call_wall']['strike'],102.5)
+        self.assertEqual(result['individual_count'],2)
+        self.assertTrue(result['coverage_complete'])
+        self.assertEqual([c[1] for c in self.quotes.calls if c[0]==OI_PRICE],['FHMIF10000000']*2)
+        self.assertTrue(all(not c[3] for c in self.quotes.calls))
+
+    def test_individual_quote_failure_keeps_coverage_incomplete_without_fake_zero(self):
+        master=self.configure_truncated_board(fail=True)
+        with patch('oi.load_index_master',return_value=master):result=self.collect()
+        self.assertFalse(result['coverage_complete'])
+        self.assertIsNone(result['put_wall']);self.assertIsNone(result['call_wall'])
+        self.assertEqual(result['individual_count'],0)
+        self.assertEqual(len(result['puts']),1)
+        self.assertTrue(any('개별 OI 조회 실패' in w for w in result['warnings']))
+
     def test_existing_real_token_is_unchanged_and_orders_are_blocked(self):
         (self.root/'kis_config.json').write_text(json.dumps({'profiles':{'real':{'app_key':'key','app_secret':'secret'}}}))
         path=self.root/'kis_token_real.json'
@@ -123,7 +179,9 @@ class OITests(unittest.TestCase):
         with patch.dict('os.environ',{},clear=True):
             client=ReadOnlyDerivativesClient(self.root,send,0)
             client.request(OI_EXPIRIES,'FHPIO056104C0',{})
+            client.request(OI_PRICE,'FHMIF10000000',{})
+            with self.assertRaises(TradingError):client.request(OI_PRICE,'FHMIF10000000',{},True)
             with self.assertRaises(TradingError):client.request(ORDER,'TTTC0012U',{},True)
             with self.assertRaises(TradingError):client.request(OI_OPTIONS,'FHPIF05030100',{},True)
-        self.assertEqual(len(calls),1);self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(len(calls),2);self.assertEqual(path.read_bytes(),before)
         with self.assertRaises(TradingError):transport(OI_OPTIONS,{}, {},True,base=REAL_BASE)

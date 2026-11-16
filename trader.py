@@ -23,7 +23,8 @@ OI_OPTIONS = '/uapi/domestic-futureoption/v1/quotations/display-board-callput'
 OI_EXPIRIES = '/uapi/domestic-futureoption/v1/quotations/display-board-option-list'
 OI_FUTURES = '/uapi/domestic-futureoption/v1/quotations/display-board-futures'
 OI_INDEX = '/uapi/domestic-stock/v1/quotations/inquire-index-price'
-DERIVATIVE_READS = {OI_OPTIONS:'FHPIF05030100',OI_EXPIRIES:'FHPIO056104C0',OI_FUTURES:'FHPIF05030200',OI_INDEX:'FHPUP02100000'}
+OI_PRICE = '/uapi/domestic-futureoption/v1/quotations/inquire-price'
+DERIVATIVE_READS = {OI_PRICE:'FHMIF10000000',OI_OPTIONS:'FHPIF05030100',OI_EXPIRIES:'FHPIO056104C0',OI_FUTURES:'FHPIF05030200',OI_INDEX:'FHPUP02100000'}
 
 QUOTE = '/uapi/domestic-stock/v1/quotations/inquire-price'
 ORDER = '/uapi/domestic-stock/v1/trading/order-cash'

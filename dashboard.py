@@ -21,7 +21,7 @@ from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-oi6'
+API_VERSION = '2026-11-oi7'
 
 
 def source_fingerprint():
@@ -171,7 +171,8 @@ class Dashboard:
                     db.execute('INSERT OR REPLACE INTO settings(id,value) VALUES (3,?)',(json.dumps(cfg),))
                 with self.lock:
                     self.oi_snapshot=snapshot;self.last_oi=time.monotonic()
-                    self.oi_job=dict(state='succeeded',message='OI 조회 완료'+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
+                    partial=not snapshot.get('future') or not snapshot.get('put_wall') or not snapshot.get('call_wall') or snapshot.get('coverage_complete') is False
+                    self.oi_job=dict(state='succeeded',message=('OI 일부 수신 · 누락/범위 경고 확인 필요' if partial else 'OI 조회 완료')+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
         except Exception as exc:
             with self.lock:
                 self.oi_active=False;self.last_oi=time.monotonic()
