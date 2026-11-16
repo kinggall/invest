@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from oi import OIService,candidates
+from oi import OIService,candidates,monthly_expiry,nearest_month
 from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,ORDER,REAL_BASE,transport
 
 class Quotes:
@@ -33,6 +33,35 @@ class OITests(unittest.TestCase):
         self.addCleanup(self.service.close);self.now=datetime(2026,11,16,10,tzinfo=KST)
 
     def collect(self,**kwargs):return self.service.collect(dict(expiry='',radius_pct=5),now=kwargs.get('now',self.now))
+
+    def test_monthly_parser_handles_padding_and_encoded_code(self):
+        for row in [dict(mtrt_yymm_code='202612  ',mtrt_yymm='2026/12'),dict(mtrt_yymm_code='Z12',mtrt_yymm='202612'),dict(mtrt_yymm_code='Z12 ',mtrt_yymm='2026년 12월')]:
+            self.assertEqual(monthly_expiry(row),'202612')
+        for row in [dict(mtrt_yymm_code='W202612',mtrt_yymm='202612'),dict(mtrt_yymm_code='Z12',mtrt_yymm='202612 위클리'),dict(mtrt_yymm_code='202612',mtrt_yymm='미니'),dict(mtrt_yymm_code='Z11',mtrt_yymm='202612'),None]:
+            self.assertIsNone(monthly_expiry(row))
+        self.assertEqual(nearest_month(datetime(2026,12,16,tzinfo=KST)),'202701')
+
+    def test_empty_month_list_uses_direct_monthly_chain_not_weekly(self):
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_EXPIRIES:return dict(output=[dict(mtrt_yymm_code='W20261116',mtrt_yymm='주간')])
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        result=self.collect()
+        self.assertEqual(result['expiry'],'202612')
+        self.assertTrue(any('직접 조회' in w for w in result['warnings']))
+        self.assertEqual(next(c[2] for c in self.quotes.calls if c[0]==OI_OPTIONS)['FID_MTRT_CNT'],'202612')
+
+    def test_empty_month_list_does_not_publish_an_empty_chain(self):
+        original=self.quotes.request
+        def request(path,tr,params,post=False):
+            if path==OI_EXPIRIES:return dict(output=[])
+            if path==OI_OPTIONS:return dict(output1=[],output2=[])
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        with self.assertRaisesRegex(TradingError,'콜·풋 OI 자료가 부족'):
+            self.collect()
+        self.assertEqual(self.service.db.execute('SELECT COUNT(*) FROM oi_snapshots').fetchone()[0],0)
 
     def test_monthly_same_expiry_bounded_candidates_and_basis(self):
         result=self.collect()

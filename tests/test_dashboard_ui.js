@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('strategyForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type=match[0].match(/type="([^"]+)"/)?.[1]||'text';field.checked=false;fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-oi5',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
+let status={api_version:'2026-11-oi6',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
 const requests=[];class FormDataMock {constructor(form){this.entries=[...form.elements].filter(e=>e.type!=='checkbox'||e.checked).map(e=>[e.name,e.value])}[Symbol.iterator](){return this.entries[Symbol.iterator]()}}
 const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0,console,fetch:async(url,options)=>{
  if(options?.body)requests.push(JSON.parse(options.body));
@@ -105,7 +105,7 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  const before=requests.length;
  await vm.runInContext("action('backtest',{date:'2026-11-13'})",context);
  assert.equal(requests.length,before);
- status={...status,api_version:'2026-11-oi5',restart_required:true};
+ status={...status,api_version:'2026-11-oi6',restart_required:true};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('historyFeedback').textContent,/업데이트한 Python/);
  console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards and protective-stop controls and OI observer render passed.');

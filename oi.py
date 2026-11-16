@@ -27,6 +27,29 @@ def settings(value):
     return dict(expiry=expiry,radius_pct=radius)
 
 
+
+def monthly_expiry(item):
+    """Use the display month separately from the provider's encoded maturity code."""
+    if not isinstance(item,dict):return None
+    code=str(item.get('mtrt_yymm_code') or '').strip()
+    label=str(item.get('mtrt_yymm') or '').strip()
+    # Never reinterpret a weekly/mini label or a weekly identifier as monthly.
+    if re.search(r'주간|위클리|미니|weekly|mini',label,re.I):return None
+    pattern=r'20\d{2}(?:0[1-9]|1[0-2])'
+    if re.fullmatch(pattern,code):return code
+    normalized=re.sub(r'[\s/년월.-]','',label)
+    if re.fullmatch(pattern,normalized) and re.fullmatch(r'[A-Z](?:0[1-9]|1[0-2])',code) and code[-2:]==normalized[-2:]:
+        return normalized
+    return None
+
+
+def nearest_month(now):
+    first=now.date().replace(day=1)
+    expiry_day=first+timedelta(days=(3-first.weekday())%7+7)
+    if now.date()>expiry_day:first=(first+timedelta(days=32)).replace(day=1)
+    return first.strftime('%Y%m')
+
+
 def chain(rows,side):
     if not isinstance(rows,list):raise TradingError('OI_CHAIN_RESPONSE_INVALID')
     result={};skipped=0
@@ -92,27 +115,29 @@ class OIService:
         self.progress('옵션 월물 목록 조회 중…')
         listed=self.query(OI_EXPIRIES,dict(FID_COND_SCR_DIV_CODE='509',FID_COND_MRKT_DIV_CODE='',FID_COND_MRKT_CLS_CODE='')).get('output')
         if not isinstance(listed,list):raise TradingError('OI_EXPIRY_RESPONSE_INVALID')
-        expiries=[]
+        expiries=[];warnings=[]
+        minimum=nearest_month(now)
         for item in listed:
-            code=str(item.get('mtrt_yymm_code',''))
-            if re.fullmatch(r'20\d{2}(?:0[1-9]|1[0-2])',code):
-                expiries.append(dict(code=code,label=str(item.get('mtrt_yymm') or code)[:64]))
+            code=monthly_expiry(item)
+            if code and code>=minimum:
+                expiries.append(dict(code=code,label=code))
         expiries=sorted({r['code']:r for r in expiries}.values(),key=lambda r:r['code'])
-        def not_expired(code):
-            first=now.date().replace(day=1)
-            second_thursday=first+timedelta(days=(3-first.weekday())%7+7)
-            return code>now.strftime('%Y%m') or code==now.strftime('%Y%m') and now.date()<=second_thursday
-        expiries=[r for r in expiries if not_expired(r['code'])]
-
-        if not expiries:raise TradingError('조회 가능한 일반 월물 목록이 없습니다. 주간·미니 옵션을 월물과 섞지 않습니다.')
-        expiry=cfg['expiry'] or expiries[0]['code']
-        if expiry not in {r['code'] for r in expiries}:raise TradingError('선택 만기가 현재 옵션 월물 목록에 없습니다. 목록을 다시 확인하세요.')
+        if not expiries:
+            # The call/put endpoint officially accepts YYYYMM directly. Validate
+            # actual nonempty chains before publishing any inferred month to UI.
+            expiry=cfg['expiry'] or minimum
+            if expiry<minimum:raise TradingError('선택 월물이 표준 만기일을 지났습니다. 자동 월물로 다시 조회하세요.')
+            expiries=[dict(code=expiry,label=expiry)]
+            warnings.append('월물 목록에서 유효한 만기를 확인하지 못해 '+expiry+' 일반 월물을 직접 조회했습니다. 실제 콜·풋 자료가 수신된 경우에만 표시합니다. 목록 수신 '+str(len(listed))+'행.')
+        else:
+            expiry=cfg['expiry'] or expiries[0]['code']
+            if expiry not in {r['code'] for r in expiries}:raise TradingError('선택 만기가 현재 옵션 월물 목록에 없습니다. 자동 월물로 다시 조회하세요.')
         self.progress(expiry+' · 콜/풋 미결제약정 조회 중…')
         data=self.query(OI_OPTIONS,dict(FID_COND_MRKT_DIV_CODE='O',FID_COND_SCR_DIV_CODE='20503',FID_MRKT_CLS_CODE='CO',
             FID_MTRT_CNT=expiry,FID_MRKT_CLS_CODE1='PO',FID_COND_MRKT_CLS_CODE=''))
         calls,skip_call=chain(data.get('output1'),'call');puts,skip_put=chain(data.get('output2'),'put')
         if not calls or not puts:raise TradingError('콜·풋 OI 자료가 부족합니다. 실전 조회 권한과 선택 만기를 확인하세요.')
-        warnings=[];spot=None;future=None
+        spot=None;future=None
         self.progress('코스피200 지수와 선물 기준가격 조회 중…')
         try:
             out=self.query(OI_INDEX,dict(FID_COND_MRKT_DIV_CODE='U',FID_INPUT_ISCD='2001')).get('output')
