@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta
 import json
 import math
+import time
 from pathlib import Path
 import re
 import sqlite3
@@ -11,6 +12,11 @@ import zipfile
 from trader import KST,TradingError,ReadOnlyDerivativesClient,DERIVATIVE_READS,OI_OPTIONS,OI_EXPIRIES,OI_FUTURES,OI_INDEX,OI_PRICE
 
 
+
+MAX_QUOTES=12
+BATCH_SECONDS=15
+FRESH_SECONDS=600
+SAMPLING_VERSION=2
 
 _MASTER_CACHE=None
 
@@ -44,6 +50,7 @@ def parse_future_master(text):
 
 def load_future_master(day):
     load_index_master(day)
+    if not _MASTER_CACHE:raise TradingError('OI_FUTURE_MASTER_MISSING')
     return _MASTER_CACHE[2]
 
 
@@ -129,7 +136,7 @@ def chain(rows,side):
 
 def candidates(rows,spot,side,radius,basis):
     if spot is None:return []
-    selected=[r for r in rows if r['oi']>0 and ((spot*(1-radius/100)<=r['strike']<spot) if side=='put' else (spot<r['strike']<=spot*(1+radius/100)))]
+    selected=[r for r in rows if not r.get('stale',False) and r['oi']>0 and ((spot*(1-radius/100)<=r['strike']<spot) if side=='put' else (spot<r['strike']<=spot*(1+radius/100)))]
     total=sum(r['oi'] for r in selected)
     ranked=sorted(selected,key=lambda r:(-r['oi'],abs(r['strike']-spot),r['strike']))[:3]
     return [dict(r,local_share_pct=r['oi']/total*100,distance_pct=(r['strike']/spot-1)*100,
@@ -165,37 +172,56 @@ class OIService:
 
     def collect(self,value,now=None):
         cfg=settings(value);fixed=now is not None;now=now or datetime.now(KST)
+        old=None
         sql='SELECT payload FROM oi_snapshots'+(' WHERE expiry=?' if cfg['expiry'] else '')+' ORDER BY id DESC LIMIT 1'
         cached=self.db.execute(sql,(cfg['expiry'],) if cfg['expiry'] else ()).fetchone()
         if cached:
             old=json.loads(cached[0]);age=(now-datetime.fromisoformat(old['observed_at'])).total_seconds()
-            if 0<=age<60 and old['radius_pct']==cfg['radius_pct']:
+            if old.get('sampling_version')==SAMPLING_VERSION and old.get('requested_expiry')==cfg['expiry'] and datetime.fromisoformat(old['observed_at']).date()==now.date() and old['expiry']>=nearest_month(now) and 0<=age<60 and old['radius_pct']==cfg['radius_pct']:
                 return dict(old,cached=True,history=self.history(old['expiry'],now))
-        self.progress('옵션 월물 목록 조회 중…')
-        listed=self.query(OI_EXPIRIES,dict(FID_COND_SCR_DIV_CODE='509',FID_COND_MRKT_DIV_CODE='',FID_COND_MRKT_CLS_CODE='')).get('output')
-        if not isinstance(listed,list):raise TradingError('OI_EXPIRY_RESPONSE_INVALID')
-        expiries=[];warnings=[]
-        minimum=nearest_month(now)
-        for item in listed:
-            code=monthly_expiry(item)
-            if code and code>=minimum:
-                expiries.append(dict(code=code,label=code))
-        expiries=sorted({r['code']:r for r in expiries}.values(),key=lambda r:r['code'])
-        if not expiries:
-            # The call/put endpoint officially accepts YYYYMM directly. Validate
-            # actual nonempty chains before publishing any inferred month to UI.
-            expiry=cfg['expiry'] or minimum
-            if expiry<minimum:raise TradingError('선택 월물이 표준 만기일을 지났습니다. 자동 월물로 다시 조회하세요.')
-            expiries=[dict(code=expiry,label=expiry)]
-            warnings.append('월물 목록에서 유효한 만기를 확인하지 못해 '+expiry+' 일반 월물을 직접 조회했습니다. 실제 콜·풋 자료가 수신된 경우에만 표시합니다. 목록 수신 '+str(len(listed))+'행.')
-        else:
-            expiry=cfg['expiry'] or expiries[0]['code']
-            if expiry not in {r['code'] for r in expiries}:raise TradingError('선택 만기가 현재 옵션 월물 목록에 없습니다. 자동 월물로 다시 조회하세요.')
-        self.progress(expiry+' · 콜/풋 미결제약정 조회 중…')
-        data=self.query(OI_OPTIONS,dict(FID_COND_MRKT_DIV_CODE='O',FID_COND_SCR_DIV_CODE='20503',FID_MRKT_CLS_CODE='CO',
-            FID_MTRT_CNT=expiry,FID_MRKT_CLS_CODE1='PO',FID_COND_MRKT_CLS_CODE=''))
-        calls,skip_call=chain(data.get('output1'),'call');puts,skip_put=chain(data.get('output2'),'put')
-        if not calls or not puts:raise TradingError('콜·풋 OI 자료가 부족합니다. 실전 조회 권한과 선택 만기를 확인하세요.')
+        warnings=[];master=None;incremental=False;skip_call=skip_put=0
+        try:
+            self.progress('공식 월물 종목 확인 중…')
+            master=load_index_master(now.date().isoformat())
+            months=sorted({r['expiry'] for r in master if r['expiry']>=nearest_month(now)})
+            if not months:raise TradingError('OI_MASTER_MONTHLY_MISSING')
+            expiry=cfg['expiry'] or months[0]
+            if expiry not in months:raise TradingError('선택 월물이 공식 종목 목록에 없습니다.')
+            expiries=[dict(code=m,label=m) for m in months]
+            incremental=True;calls=[];puts=[]
+            if old and old.get('expiry')==expiry and datetime.fromisoformat(old['observed_at']).date()==now.date():
+                calls=[dict(r) for r in old['calls']];puts=[dict(r) for r in old['puts']]
+        except TradingError:
+            # Public metadata unavailable: retain the existing board-only path.
+            warnings.append('공식 종목 목록을 확인하지 못해 전광판으로 대체 조회합니다. 응답이 느릴 수 있습니다.')
+            master=None
+            self.progress('옵션 월물 목록 조회 중…')
+            listed=self.query(OI_EXPIRIES,dict(FID_COND_SCR_DIV_CODE='509',FID_COND_MRKT_DIV_CODE='',FID_COND_MRKT_CLS_CODE='')).get('output')
+            if not isinstance(listed,list):raise TradingError('OI_EXPIRY_RESPONSE_INVALID')
+            expiries=[]
+            minimum=nearest_month(now)
+            for item in listed:
+                code=monthly_expiry(item)
+                if code and code>=minimum:
+                    expiries.append(dict(code=code,label=code))
+            expiries=sorted({r['code']:r for r in expiries}.values(),key=lambda r:r['code'])
+            if not expiries:
+                # The call/put endpoint officially accepts YYYYMM directly. Validate
+                # actual nonempty chains before publishing any inferred month to UI.
+                expiry=cfg['expiry'] or minimum
+                if expiry<minimum:raise TradingError('선택 월물이 표준 만기일을 지났습니다. 자동 월물로 다시 조회하세요.')
+                expiries=[dict(code=expiry,label=expiry)]
+                warnings.append('월물 목록에서 유효한 만기를 확인하지 못해 '+expiry+' 일반 월물을 직접 조회했습니다. 실제 콜·풋 자료가 수신된 경우에만 표시합니다. 목록 수신 '+str(len(listed))+'행.')
+            else:
+                expiry=cfg['expiry'] or expiries[0]['code']
+                if expiry not in {r['code'] for r in expiries}:raise TradingError('선택 만기가 현재 옵션 월물 목록에 없습니다. 자동 월물로 다시 조회하세요.')
+            self.progress(expiry+' · 콜/풋 미결제약정 조회 중…')
+            data=self.query(OI_OPTIONS,dict(FID_COND_MRKT_DIV_CODE='O',FID_COND_SCR_DIV_CODE='20503',FID_MRKT_CLS_CODE='CO',
+                FID_MTRT_CNT=expiry,FID_MRKT_CLS_CODE1='PO',FID_COND_MRKT_CLS_CODE=''))
+            calls,skip_call=chain(data.get('output1'),'call');puts,skip_put=chain(data.get('output2'),'put')
+            if not calls or not puts:raise TradingError('콜·풋 OI 자료가 부족합니다. 실전 조회 권한과 선택 만기를 확인하세요.')
+            board_at=(now if fixed else datetime.now(KST)).isoformat()
+            for row in calls+puts:row['received_at']=board_at
         spot=None;future=None
         self.progress('코스피200 지수와 선물 기준가격 조회 중…')
         try:
@@ -205,26 +231,27 @@ class OIService:
             spot=number(out.get('bstp_nmix_prpr'),'KOSPI200')
             if spot<=0:raise TradingError('OI_INDEX_PRICE_MISSING')
         except TradingError as exc:warnings.append(str(exc));spot=None
-        try:
-            out=self.query(OI_FUTURES,dict(FID_COND_MRKT_DIV_CODE='F',FID_COND_SCR_DIV_CODE='20503',FID_COND_MRKT_CLS_CODE='MKI')).get('output')
-            if not isinstance(out,list):raise TradingError('OI_FUTURES_RESPONSE_INVALID')
-            choices=[]
-            skipped_futures=0
-            for row in out:
-                code=str(row.get('futs_shrn_iscd','')).strip()
-                if not re.fullmatch(r'(?:101|A01)[A-Z0-9]{3}',code):continue
-                try:
-                    price=number(row.get('futs_prpr'),'FUTURE_PRICE')
-                    days=number(row.get('hts_rmnn_dynu'),'REMAINING_DAYS',True,True,True)
-                    if price<=0 or days is not None and days<0:continue
-                    choices.append(dict(code=code,name=str(row.get('hts_kor_isnm',code))[:80],price=price,
-                        volume=number(row.get('acml_vol'),'FUTURE_VOLUME',True,True),remaining_days=days,
-                        oi=number(row.get('hts_otst_stpl_qty'),'FUTURE_OI',True,True)))
-                except TradingError:skipped_futures+=1
-            if skipped_futures:warnings.append('가격/수량이 확인되지 않는 선물 '+str(skipped_futures)+'개 행을 제외했습니다.')
-            if not choices:raise TradingError('OI_KOSPI200_FUTURE_MISSING')
-            future=sorted(choices,key=lambda r:(-(r['volume'] or 0),r['remaining_days'] if r['remaining_days'] is not None else 9999,r['code']))[0]
-        except TradingError as exc:warnings.append(str(exc))
+        if not incremental:
+            try:
+                out=self.query(OI_FUTURES,dict(FID_COND_MRKT_DIV_CODE='F',FID_COND_SCR_DIV_CODE='20503',FID_COND_MRKT_CLS_CODE='MKI')).get('output')
+                if not isinstance(out,list):raise TradingError('OI_FUTURES_RESPONSE_INVALID')
+                choices=[]
+                skipped_futures=0
+                for row in out:
+                    code=str(row.get('futs_shrn_iscd','')).strip()
+                    if not re.fullmatch(r'(?:101|A01)[A-Z0-9]{3}',code):continue
+                    try:
+                        price=number(row.get('futs_prpr'),'FUTURE_PRICE')
+                        days=number(row.get('hts_rmnn_dynu'),'REMAINING_DAYS',True,True,True)
+                        if price<=0 or days is not None and days<0:continue
+                        choices.append(dict(code=code,name=str(row.get('hts_kor_isnm',code))[:80],price=price,
+                            volume=number(row.get('acml_vol'),'FUTURE_VOLUME',True,True),remaining_days=days,
+                            oi=number(row.get('hts_otst_stpl_qty'),'FUTURE_OI',True,True)))
+                    except TradingError:skipped_futures+=1
+                if skipped_futures:warnings.append('가격/수량이 확인되지 않는 선물 '+str(skipped_futures)+'개 행을 제외했습니다.')
+                if not choices:raise TradingError('OI_KOSPI200_FUTURE_MISSING')
+                future=sorted(choices,key=lambda r:(-(r['volume'] or 0),r['remaining_days'] if r['remaining_days'] is not None else 9999,r['code']))[0]
+            except TradingError as exc:warnings.append(str(exc))
         if future is None:
             try:
                 contracts=[r for r in load_future_master(now.date().isoformat()) if r['expiry']>=nearest_month(now)]
@@ -243,19 +270,36 @@ class OIService:
             except TradingError as exc:warnings.append(str(exc)+' · 선물 현재가 직접 조회도 확인되지 않았습니다.')
         # Board responses can stop before ATM because each side is capped at 100.
         # Get missing contracts from the official same-month master, never infer OI.
-        coverage_complete=None;individual_count=0
-        if spot is not None and (len(calls)>=100 or len(puts)>=100 or not candidates(calls,spot,'call',cfg['radius_pct'],None) or not candidates(puts,spot,'put',cfg['radius_pct'],None)):
+        coverage_complete=None;individual_count=0;targets=[];attempted=0;budget_hit=False
+        if spot is not None and (incremental or len(calls)>=100 or len(puts)>=100 or not candidates(calls,spot,'call',cfg['radius_pct'],None) or not candidates(puts,spot,'put',cfg['radius_pct'],None)):
             coverage_complete=False
             try:
-                master=load_index_master(now.date().isoformat())
+                master=master if master is not None else load_index_master(now.date().isoformat())
                 targets=[r for r in master if r['expiry']==expiry and abs(r['strike']/spot-1)*100<=cfg['radius_pct']+1e-9]
                 if not targets:raise TradingError('OI_MASTER_NEARBY_MONTH_MISSING')
                 collected={(r['side'],r['strike']):r for r in calls+puts}
-                missing=[r for r in targets if (r['side'],r['strike']) not in collected or collected[(r['side'],r['strike'])]['code']!=r['code']]
-                missing.sort(key=lambda r:(abs(r['strike']-spot),r['strike'],r['side']))
-                failures=0;consecutive=0
-                for i,contract in enumerate(missing[:80]):
-                    self.progress(expiry+' · 근방 OI 개별 조회 '+str(i+1)+'/'+str(min(80,len(missing))))
+                # Keep previous source times. Only returned quotes get a new timestamp.
+                def age_of(contract):
+                    item=collected.get((contract['side'],contract['strike']))
+                    if not item or item['code']!=contract['code'] or not item.get('received_at'):return float('inf')
+                    return max(0,(now-datetime.fromisoformat(item['received_at'])).total_seconds())
+                nearest=sorted(targets,key=lambda r:(abs(r['strike']-spot),r['strike'],r['side']))
+                watched=[]
+                if old and old.get('expiry')==expiry:
+                    for side in ('put','call'):
+                        wall=old.get(side+'_wall')
+                        if wall:watched.extend(r for r in targets if r['side']==side and r['code']==wall['code'])
+                priorities=[]
+                for item in watched+nearest:
+                    if item not in priorities:priorities.append(item)
+                    if len(priorities)>=4:break
+                rotating=sorted([r for r in targets if r not in priorities],key=lambda r:(-age_of(r),abs(r['strike']-spot),r['strike'],r['side']))
+                batch=(priorities+rotating)[:MAX_QUOTES]
+                failures=0;consecutive=0;started=time.monotonic()
+                for i,contract in enumerate(batch):
+                    if time.monotonic()-started>=BATCH_SECONDS:budget_hit=True;break
+                    attempted+=1
+                    self.progress(expiry+' · 빠른 OI 갱신 '+str(i+1)+'/'+str(len(batch))+' · 나머지는 순환 수집')
                     try:
                         quoted=self.query(OI_PRICE,dict(FID_COND_MRKT_DIV_CODE='O',FID_INPUT_ISCD=contract['code']))
                         fields={}
@@ -267,6 +311,7 @@ class OIService:
                         fields.update(acpr=contract['strike'],optn_shrn_iscd=contract['code'])
                         parsed,skipped=chain([fields],contract['side'])
                         if not parsed:raise TradingError('OI_QUOTE_MISSING')
+                        parsed[0]['received_at']=(now if fixed else datetime.now(KST)).isoformat()
                         collected[(contract['side'],contract['strike'])]=parsed[0]
                         individual_count+=1;consecutive=0
                     except TradingError:
@@ -274,31 +319,45 @@ class OIService:
                         if consecutive>=3:break
                 calls=sorted([r for r in collected.values() if r['side']=='call'],key=lambda r:r['strike'])
                 puts=sorted([r for r in collected.values() if r['side']=='put'],key=lambda r:r['strike'])
-                coverage_complete=all((r['side'],r['strike']) in collected and collected[(r['side'],r['strike'])]['code']==r['code'] for r in targets)
-                warnings.append('전광판 100행 제한/근방 누락 보완: 공식 동일 월물 종목으로 OI '+str(individual_count)+'개 개별 수신. 근방 범위 '+('확인됨' if coverage_complete else '불완전')+'.')
+                coverage_complete=all(age_of(r)<=FRESH_SECONDS for r in targets)
+                warnings.append('분할 갱신 '+str(individual_count)+'/'+str(len(targets))+'종목 · 현재가/직전 후보 우선, 나머지는 오래된 순으로 순환합니다. 10분 초과 자료는 후보에서 제외합니다.')
                 if failures:warnings.append('개별 OI 조회 실패 '+str(failures)+'건. 결측을 0으로 대체하지 않았습니다.')
-                if len(missing)>80:warnings.append('개별 조회는 1회 최대 80종목입니다. 탐색 범위를 줄이면 확인할 종목 수를 줄일 수 있습니다.')
+                if budget_hit:warnings.append('이번 개별 조회의 15초 시작 예산에 도달해 나머지는 다음 갱신으로 넘겼습니다. 진행 중 요청의 응답 시간은 추가될 수 있습니다.')
             except TradingError as exc:warnings.append(str(exc)+' · 현재 지수 근방 OI 범위를 확인하지 못했습니다.')
         basis=future['price']-spot if future and spot is not None else None
         observed=now if fixed else datetime.now(KST)
         previous=self.db.execute('SELECT payload FROM oi_snapshots WHERE expiry=? AND observed_at>=? AND observed_at<? ORDER BY id DESC LIMIT 1',
             (expiry,observed.date().isoformat(),observed.isoformat())).fetchone()
         previous=json.loads(previous[0]) if previous else None
-        if previous:
-            old={(r['side'],r['strike'],r['code']):r for r in previous['calls']+previous['puts']}
-            for item in calls+puts:
-                match=old.get((item['side'],item['strike'],item['code']))
-                if match:item['observed_change']=item['oi']-match['oi']
+        previous_rows={(r['side'],r['strike'],r['code']):r for r in previous['calls']+previous['puts']} if previous else {}
+        for item in calls+puts:
+            stamp=item.get('received_at')
+            age=(observed-datetime.fromisoformat(stamp)).total_seconds() if stamp else None
+            item['age_seconds']=max(0,age) if age is not None else None
+            item['stale']=age is None or age<0 or age>FRESH_SECONDS
+            match=previous_rows.get((item['side'],item['strike'],item['code']))
+            updated=bool(stamp and (not match or stamp!=match.get('received_at')))
+            item['reused']=not updated
+            item['observed_change']=None;item['comparison_at']=None;item['comparison_seconds']=None
+            if updated and match and match.get('received_at'):
+                item['observed_change']=item['oi']-match['oi']
+                item['comparison_at']=match['received_at']
+                item['comparison_seconds']=(datetime.fromisoformat(stamp)-datetime.fromisoformat(match['received_at'])).total_seconds()
+        target_keys={(r['side'],r['strike'],r['code']) for r in targets}
+        target_rows=[r for r in calls+puts if (r['side'],r['strike'],r['code']) in target_keys]
+        sampling=dict(mode='incremental' if incremental else 'board',total=len(targets),received=len(target_rows),fresh=sum(not r['stale'] for r in target_rows),
+            updated=individual_count,attempted=attempted,max_quotes=MAX_QUOTES,budget_seconds=BATCH_SECONDS,fresh_seconds=FRESH_SECONDS)
+        if targets:coverage_complete=sampling['fresh']==sampling['total']
         put_candidates=candidates(puts,spot,'put',cfg['radius_pct'],basis)
         call_candidates=candidates(calls,spot,'call',cfg['radius_pct'],basis)
-        if len(calls)>=100 or len(puts)>=100:warnings.append('API는 각 측 최대 100건입니다. 수신 범위 안의 후보이며 전체 행사가를 보장하지 않습니다.')
+        if not incremental and (len(calls)>=100 or len(puts)>=100):warnings.append('API는 각 측 최대 100건입니다. 수신 범위 안의 후보이며 전체 행사가를 보장하지 않습니다.')
         if skip_call+skip_put:warnings.append('행사가/OI 필드가 없는 '+str(skip_call+skip_put)+'개 행을 제외했습니다.')
         if not put_candidates or not call_candidates:warnings.append('현재 지수의 지정 근방에서 양쪽 후보가 모두 확인되지는 않았습니다.')
         if observed.weekday()>=5 or not ((8,45)<=(observed.hour,observed.minute)<(15,45)):
             warnings.append('정규장 외 조회입니다. 직전 장 자료일 수 있으며 원자료 갱신시각은 확인되지 않았습니다.')
         if (observed-now).total_seconds()>30:warnings.append('조회에 30초 이상 걸렸습니다. 지수·선물·OI는 동시 체결 시각 자료가 아니며 환산선은 참고값입니다.')
         snapshot=dict(collection_started_at=now.isoformat(),collection_seconds=(observed-now).total_seconds(),expiry=expiry,expiries=expiries,radius_pct=cfg['radius_pct'],observed_at=observed.isoformat(),source_time=None,
-            spot=spot,future=future,basis=basis,calls=calls,puts=puts,coverage_complete=coverage_complete,individual_count=individual_count,put_candidates=put_candidates,call_candidates=call_candidates,
+            sampling_version=SAMPLING_VERSION,requested_expiry=cfg['expiry'],sampling=sampling,spot=spot,future=future,basis=basis,calls=calls,puts=puts,coverage_complete=coverage_complete,individual_count=individual_count,put_candidates=put_candidates,call_candidates=call_candidates,
             put_wall=put_candidates[0] if put_candidates else None,call_wall=call_candidates[0] if call_candidates else None,
             comparison_at=previous['observed_at'] if previous else None,
             comparison_seconds=(observed-datetime.fromisoformat(previous['observed_at'])).total_seconds() if previous else None,
