@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('strategyForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type=match[0].match(/type="([^"]+)"/)?.[1]||'text';field.checked=false;fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-kodex1',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'kodex-macd-v1',symbol:'069500',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
+let status={api_version:'2026-11-futures1',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'kodex-macd-v1',symbol:'069500',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
 const requests=[];class FormDataMock {constructor(form){this.entries=[...form.elements].filter(e=>e.type!=='checkbox'||e.checked).map(e=>[e.name,e.value])}[Symbol.iterator](){return this.entries[Symbol.iterator]()}}
 const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0,console,fetch:async(url,options)=>{
  if(options?.body)requests.push(JSON.parse(options.body));
@@ -113,6 +113,23 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  assert.match(elements.get('oiWarnings').textContent,/수신 콜 1 \/ 풋 1행/);
  assert.match(elements.get('oiFutureName').textContent,/미수신/);
 
+ const futureBar={time:'2026-11-17T01:00:00+09:00',end:'2026-11-17T01:03:00+09:00',open:799,high:801,low:798,close:800,volume:100};
+ const nightContext={id:'night:2026-11-16',mode:'night',market:'CM',start:'2026-11-16T18:00:00+09:00',end:'2026-11-17T06:00:00+09:00',scheduled_open:true};
+ status={...status,future_context:nightContext,future_job:{state:'succeeded',message:'야간 선물 조회 완료'},future_snapshot:{session:nightContext,code:'A01612',source:'실제 분봉 CM',observed_at:'2026-11-17T01:03:10+09:00',last_bar_end:futureBar.end,bars:[futureBar],warnings:[],stale:false}};
+ await vm.runInContext('refresh()',context);
+ assert.match(elements.get('futureTitle').textContent,/야간선물 · CM/);
+ assert.match(elements.get('futureMeta').textContent,/A01612/);
+ assert.ok(elements.get('futureCandles').children.some(n=>typeof n.attrs.width==='number'&&typeof n.attrs.height==='number'));
+ assert.match(elements.get('futureWarnings').textContent,/환산선을 숨깁니다/);
+ assert.equal(elements.get('oiFuture').textContent,'800pt / —pt');
+ assert.match(elements.get('oiFutureName').textContent,/야간/);
+ status={...status,future_job:{state:'failed',message:'야간 실제 분봉 미수신'}};
+ await vm.runInContext('refresh()',context);
+ assert.match(elements.get('futureFeedback').textContent,/미수신/);
+ assert.equal(elements.get('futureCandles').children.length,1);
+ status={...status,future_job:{state:'succeeded',message:'야간 선물 조회 완료'},future_context:{...nightContext,scheduled_open:false}};
+ await vm.runInContext('refresh()',context);
+ assert.match(elements.get('futureMeta').textContent,/거래시간 종료/);
  const partial={...point,vwap:null,vwap_observed:14999,vwap_quality:'partial',vwap_missing_minutes:1,vwap_missing_times:['09:04']};
  status={...status,history:{...status.history,chart:[partial]}};
  await vm.runInContext('refresh()',context);
@@ -126,7 +143,7 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  const before=requests.length;
  await vm.runInContext("action('backtest',{date:'2026-11-13'})",context);
  assert.equal(requests.length,before);
- status={...status,api_version:'2026-11-kodex1',restart_required:true};
+ status={...status,api_version:'2026-11-futures1',restart_required:true};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('historyFeedback').textContent,/업데이트한 Python/);
  console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards and protective-stop controls and OI observer render passed.');

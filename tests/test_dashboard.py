@@ -194,9 +194,28 @@ class DashboardTests(unittest.TestCase):
             self.app.lookup_thread.join(2)
         self.assertEqual(self.app.lookup_job['state'],'succeeded')
 
+    def test_futures_quote_worker_is_independent_of_trading_and_oi(self):
+        snapshot=dict(session=dict(id='night:2026-11-16',mode='night'),bars=[])
+        service=Mock();service.collect.return_value=snapshot
+        self.app.enabled=True;self.app.risk_active=True;self.app.oi_active=True
+        with patch.object(d,'FuturesChart',return_value=service),patch.object(self.app,'engine',side_effect=AssertionError('No order engine')):
+            self.app.run_future()
+        self.assertEqual(self.app.future_snapshot,snapshot)
+        self.assertEqual(self.app.future_job['state'],'succeeded')
+        self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active);self.assertTrue(self.app.oi_active)
+        service.close.assert_called_once()
+
+    def test_futures_failure_does_not_stop_other_workers_or_relabel_old_data(self):
+        self.app.enabled=True;self.app.risk_active=True;self.app.oi_active=True
+        service=Mock();service.collect.side_effect=TradingError('FUTURES_SESSION_EMPTY')
+        with patch.object(d,'FuturesChart',return_value=service):self.app.run_future()
+        self.assertEqual(self.app.future_job['state'],'failed')
+        self.assertIsNone(self.app.future_snapshot)
+        self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active);self.assertTrue(self.app.oi_active)
+
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-kodex1')
+        self.assertEqual(status['api_version'],'2026-11-futures1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

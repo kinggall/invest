@@ -17,19 +17,20 @@ from trader import DemoClient, SharedToken, TradingError, KST
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from instruments import PREVIOUS_SYMBOL
 from confirmation import assess
+from futures_chart import FuturesChart, session_at
 from signals import macd
 from history import History
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-kodex1'
+API_VERSION = '2026-11-futures1'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -47,6 +48,10 @@ class Dashboard:
         self.oi_job=dict(state='idle',message='OI 조회를 누르면 실제 수신 자료와 벽 후보를 표시합니다.')
         self.last_oi=0
         self.oi_thread=None
+        self.future_snapshot=None
+        self.future_job=dict(state='idle',message='선물 주간/야간 실제 분봉 조회 대기')
+        self.last_future=0
+        self.future_thread=None
         self.enabled = False
         self.risk_active = False
         self.risk_snapshot = dict(status='DISARMED',message='손절 감시 중지')
@@ -124,7 +129,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -218,6 +223,37 @@ class Dashboard:
         self.oi_thread=threading.Thread(target=self.run_oi,args=(cfg,),daemon=True)
         self.oi_thread.start()
 
+    def run_future(self):
+        service=None
+        try:
+            service=FuturesChart(self.home,self.state,progress=self.future_progress)
+            snapshot=service.collect()
+            with self.lock:
+                self.future_snapshot=snapshot
+                self.future_job=dict(state='succeeded',message=('야간' if snapshot['session']['mode']=='night' else '주간')+' 선물 실제 3분봉 조회 완료')
+        except Exception as exc:
+            with self.lock:self.future_job=dict(state='failed',message=self.lookup_error(exc))
+        finally:
+            if service is not None:service.close()
+            with self.lock:self.last_future=time.monotonic()
+
+    def future_progress(self,message):
+        with self.lock:self.future_job['message']=message
+
+    def request_future(self):
+        if self.future_job['state']=='running':raise TradingError('선물 차트 조회가 진행 중입니다.')
+        self.future_job=dict(state='running',message='주간/야간 세션 확인 중…')
+        self.future_thread=threading.Thread(target=self.run_future,daemon=True)
+        self.future_thread.start()
+
+    def future_worker(self):
+        while not self.shutdown.wait(1):
+            context=session_at(datetime.now(KST))
+            with self.lock:
+                same=self.future_snapshot and self.future_snapshot['session']['id']==context['id']
+                due=time.monotonic()-self.last_future>=60
+                if self.future_job['state']!='running' and due and (context['scheduled_open'] or not same):self.request_future()
+
     def oi_worker(self):
         while not self.shutdown.wait(1):
             now=datetime.now(KST)
@@ -307,6 +343,8 @@ class Dashboard:
         with self.lock:
             if command in ('oi_refresh','oi_start'):
                 self.request_oi(value,command=='oi_start')
+            elif command=='future_refresh':
+                self.request_future()
             elif command=='oi_stop':
                 self.oi_active=False
                 self.oi_job['message']='OI 자동 기록 중지 · 진행 중인 조회는 완료될 수 있습니다.'
@@ -439,6 +477,7 @@ def main():
     threading.Thread(target=app.worker, daemon=True).start()
     threading.Thread(target=app.risk_worker, daemon=True).start()
     threading.Thread(target=app.oi_worker, daemon=True).start()
+    threading.Thread(target=app.future_worker, daemon=True).start()
     url = 'http://127.0.0.1:' + str(server.server_port)
     print('모의투자 관리: ' + url, flush=True)
     if not args.no_browser:

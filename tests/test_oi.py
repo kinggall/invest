@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from oi import OIService,candidates,monthly_expiry,nearest_month,parse_index_master,parse_future_master
-from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,OI_PRICE,ORDER,REAL_BASE,transport
+from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,OI_PRICE,FUTURES_MINUTES,ORDER,REAL_BASE,transport
 
 class Quotes:
     def __init__(self):self.calls=[];self.extra=0;self.no_spot=False;self.no_future=False
@@ -301,8 +301,10 @@ class OITests(unittest.TestCase):
             client=ReadOnlyDerivativesClient(self.root,send,0)
             client.request(OI_EXPIRIES,'FHPIO056104C0',{})
             client.request(OI_PRICE,'FHMIF10000000',{})
+            client.request(FUTURES_MINUTES,'FHKIF03020200',{})
+            with self.assertRaises(TradingError):client.request(FUTURES_MINUTES,'FHKIF03020200',{},True)
             with self.assertRaises(TradingError):client.request(OI_PRICE,'FHMIF10000000',{},True)
             with self.assertRaises(TradingError):client.request(ORDER,'TTTC0012U',{},True)
             with self.assertRaises(TradingError):client.request(OI_OPTIONS,'FHPIF05030100',{},True)
-        self.assertEqual(len(calls),2);self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(len(calls),3);self.assertEqual(path.read_bytes(),before)
         with self.assertRaises(TradingError):transport(OI_OPTIONS,{}, {},True,base=REAL_BASE)
