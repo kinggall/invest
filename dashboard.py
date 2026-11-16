@@ -18,15 +18,16 @@ from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from signals import macd
 from history import History
 from backtest import simulate, STRATEGIES
+from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-risk4'
+API_VERSION = '2026-11-oi5'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -38,6 +39,12 @@ class Dashboard:
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.io_lock = threading.Lock()
+        self.oi_lock=threading.Lock()
+        self.oi_active=False
+        self.oi_snapshot=None
+        self.oi_job=dict(state='idle',message='OI 조회를 누르면 실제 수신 자료와 벽 후보를 표시합니다.')
+        self.last_oi=0
+        self.oi_thread=None
         self.enabled = False
         self.risk_active = False
         self.risk_snapshot = dict(status='DISARMED',message='손절 감시 중지')
@@ -59,6 +66,9 @@ class Dashboard:
             if previous.get('mode') != 'macd':
                 db.execute('INSERT OR IGNORE INTO settings VALUES (2, ?)', (json.dumps(previous),))
                 db.execute('UPDATE settings SET value=? WHERE id=1', (json.dumps(DEFAULT),))
+        with self.db() as db:
+            saved=db.execute('SELECT value FROM settings WHERE id=3').fetchone()
+        self.oi_config=oi_settings(json.loads(saved[0])) if saved else dict(expiry='',radius_pct=5)
         self.state.chmod(0o600)
 
     @contextmanager
@@ -100,7 +110,7 @@ class Dashboard:
                     engine.db.close()
             except TradingError:
                 pass
-            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def tick(self, execute):
@@ -147,6 +157,44 @@ class Dashboard:
                 with self.lock:
                     self.enabled=False
                     self.risk_snapshot=dict(status='ERROR',message=self.lookup_error(exc),observed_at=datetime.now(KST).isoformat(timespec='seconds'))
+
+    def oi_progress(self,message):
+        with self.lock:self.oi_job['message']=message
+
+    def run_oi(self,cfg):
+        service=None
+        try:
+            with self.oi_lock:
+                service=OIService(self.home,self.state,progress=self.oi_progress)
+                snapshot=service.collect(cfg)
+                with self.db() as db:
+                    db.execute('INSERT OR REPLACE INTO settings(id,value) VALUES (3,?)',(json.dumps(cfg),))
+                with self.lock:
+                    self.oi_snapshot=snapshot;self.last_oi=time.monotonic()
+                    self.oi_job=dict(state='succeeded',message='OI 조회 완료'+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
+        except Exception as exc:
+            with self.lock:
+                self.oi_active=False;self.last_oi=time.monotonic()
+                self.oi_job=dict(state='failed',message=self.lookup_error(exc))
+        finally:
+            if service is not None:service.close()
+
+    def request_oi(self,value,auto=False):
+        cfg=oi_settings(value)
+        if self.oi_job['state']=='running':raise TradingError('OI 조회가 진행 중입니다. 진행 상태를 확인하세요.')
+        if self.oi_active and cfg!=self.oi_config:raise TradingError('OI 기록을 중지한 뒤 만기·범위를 변경하세요.')
+        self.oi_config=cfg;self.oi_active=auto or self.oi_active
+        self.oi_job=dict(state='running',message='실전 읽기 전용 OI 조회 준비 중…')
+        self.oi_thread=threading.Thread(target=self.run_oi,args=(cfg,),daemon=True)
+        self.oi_thread.start()
+
+    def oi_worker(self):
+        while not self.shutdown.wait(1):
+            now=datetime.now(KST)
+            session=now.weekday()<5 and (8,45)<=(now.hour,now.minute)<(15,45)
+            with self.lock:
+                if self.oi_active and session and self.oi_job['state']!='running' and time.monotonic()-self.last_oi>=60:
+                    self.request_oi(self.oi_config,True)
 
     def progress(self, job_id, message):
         with self.lock:
@@ -227,7 +275,12 @@ class Dashboard:
 
     def action(self, command, value):
         with self.lock:
-            if command == 'strategy':
+            if command in ('oi_refresh','oi_start'):
+                self.request_oi(value,command=='oi_start')
+            elif command=='oi_stop':
+                self.oi_active=False
+                self.oi_job['message']='OI 자동 기록 중지 · 진행 중인 조회는 완료될 수 있습니다.'
+            elif command == 'strategy':
                 if self.enabled or self.risk_active:
                     raise TradingError('먼저 자동 실행과 손절 감시를 중지하세요.')
                 strategy = validate(value)
@@ -352,6 +405,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(app))
     threading.Thread(target=app.worker, daemon=True).start()
     threading.Thread(target=app.risk_worker, daemon=True).start()
+    threading.Thread(target=app.oi_worker, daemon=True).start()
     url = 'http://127.0.0.1:' + str(server.server_port)
     print('모의투자 관리: ' + url, flush=True)
     if not args.no_browser:

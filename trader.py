@@ -19,6 +19,12 @@ import urllib.parse
 BASE = 'https://openapivts.koreainvestment.com:29443'
 REAL_BASE = 'https://openapi.koreainvestment.com:9443'
 HISTORY_PATH = '/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice'
+OI_OPTIONS = '/uapi/domestic-futureoption/v1/quotations/display-board-callput'
+OI_EXPIRIES = '/uapi/domestic-futureoption/v1/quotations/display-board-option-list'
+OI_FUTURES = '/uapi/domestic-futureoption/v1/quotations/display-board-futures'
+OI_INDEX = '/uapi/domestic-stock/v1/quotations/inquire-index-price'
+DERIVATIVE_READS = {OI_OPTIONS:'FHPIF05030100',OI_EXPIRIES:'FHPIO056104C0',OI_FUTURES:'FHPIF05030200',OI_INDEX:'FHPUP02100000'}
+
 QUOTE = '/uapi/domestic-stock/v1/quotations/inquire-price'
 ORDER = '/uapi/domestic-stock/v1/trading/order-cash'
 FILLS = '/uapi/domestic-stock/v1/trading/inquire-daily-ccld'
@@ -53,7 +59,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def transport(path, headers, payload, post, *, base=BASE):
-    if base != BASE and not (base == REAL_BASE and path == HISTORY_PATH and not post):
+    if base != BASE and not (base == REAL_BASE and path in {HISTORY_PATH,*DERIVATIVE_READS} and not post):
         raise TradingError('REAL_ROUTE_BLOCKED')
     url = base + path
     body = None
@@ -147,6 +153,24 @@ class ReadOnlyHistoryClient:
         finally:self.last=time.monotonic()
         if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':
             raise TradingError('HISTORY_QUERY_REJECTED / CODE='+safe_code(data))
+        return data
+
+
+class ReadOnlyDerivativesClient:
+    """Whitelisted real quote GETs only. No account endpoint, order, or token issuance."""
+    def __init__(self,home,send=None,interval=1.1):
+        self.tokens=SharedToken(home,'real');self.send=send;self.interval=max(0,interval);self.last=0
+
+    def request(self,path,tr_id,payload,post=False):
+        if DERIVATIVE_READS.get(path)!=tr_id or post:raise TradingError('DERIVATIVES_READ_ONLY_ROUTE_BLOCKED')
+        key,secret,token=self.tokens.read()
+        headers={'Content-Type':'application/json; charset=utf-8','authorization':'Bearer '+token,
+            'appkey':key,'appsecret':secret,'tr_id':tr_id,'custtype':'P'}
+        time.sleep(max(0,self.interval-(time.monotonic()-self.last)))
+        try:
+            data=self.send(path,headers,payload,False) if self.send else transport(path,headers,payload,False,base=REAL_BASE)
+        finally:self.last=time.monotonic()
+        if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':raise TradingError('OI_QUOTE_REJECTED / CODE='+safe_code(data))
         return data
 
 

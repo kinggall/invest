@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('strategyForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type=match[0].match(/type="([^"]+)"/)?.[1]||'text';field.checked=false;fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-risk4',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
+let status={api_version:'2026-11-oi5',restart_required:false,csrf:'test-token',enabled:false,token:'준비',account_ready:true,strategy:{id:'tiger-macd-v1',symbol:'472150',fast:12,slow:26,signal:9,quantity:1,max_notional:100000,limit_offset_bps:10,max_daily_buys:10,vwap_filter:false,stop_loss_enabled:false,stop_loss_pct:1},orders:[],signals:[],snapshot:null,history:null,backtest:null,last_message:'중지됨',lookup_job:{state:'idle'}};
 const requests=[];class FormDataMock {constructor(form){this.entries=[...form.elements].filter(e=>e.type!=='checkbox'||e.checked).map(e=>[e.name,e.value])}[Symbol.iterator](){return this.entries[Symbol.iterator]()}}
 const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0,console,fetch:async(url,options)=>{
  if(options?.body)requests.push(JSON.parse(options.body));
@@ -81,6 +81,17 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  assert.equal(requests.at(-1).stop_loss_enabled,true);
  assert.equal(requests.at(-1).stop_loss_pct,1);
  assert.equal(requests.at(-1).stop_halt,true);
+ const call={side:'call',strike:102.5,code:'C',oi:200,api_change:8,observed_change:10,volume:100,local_share_pct:60,projected_future_level:104.5},put={side:'put',strike:97.5,code:'P',oi:300,api_change:8,observed_change:-5,volume:200,local_share_pct:75,projected_future_level:99.5};
+ status={...status,oi_active:true,oi_config:{expiry:'',radius_pct:5},oi_job:{state:'succeeded',message:'OI 조회 완료'},oi_snapshot:{expiry:'202612',expiries:[{code:'202612',label:'2026년12월'}],radius_pct:5,observed_at:'2026-11-16T10:00:00+09:00',calls:[call],puts:[put],put_wall:put,call_wall:call,spot:100,future:{price:102,code:'101Z12',name:'코스피200'},basis:2,warnings:[],history:[{observed_at:'2026-11-16T10:00:00+09:00',future_code:'101Z12',future_price:102,put_future:99.5,call_future:104.5,put_strike:97.5,call_strike:102.5,put_oi:300,call_oi:200}]}};
+ await vm.runInContext('refresh()',context);
+ assert.equal(elements.get('oiContent').hidden,false);
+ assert.match(elements.get('oiPut').textContent,/97.5/);
+ assert.match(elements.get('oiCall').textContent,/102.5/);
+ assert.ok(elements.get('oiBars').children.length>0);
+ assert.ok(elements.get('oiHistoryChart').children.length>0);
+ assert.equal(elements.get('oiStop').disabled,false);
+ assert.equal(elements.get('oiRows').children.length,2);
+ assert.match(elements.get('oiPutInfo').textContent,/-5/);
  const partial={...point,vwap:null,vwap_observed:14999,vwap_quality:'partial',vwap_missing_minutes:1,vwap_missing_times:['09:04']};
  status={...status,history:{...status.history,chart:[partial]}};
  await vm.runInContext('refresh()',context);
@@ -94,8 +105,8 @@ const context=vm.createContext({document,FormData:FormDataMock,setInterval:()=>0
  const before=requests.length;
  await vm.runInContext("action('backtest',{date:'2026-11-13'})",context);
  assert.equal(requests.length,before);
- status={...status,api_version:'2026-11-risk4',restart_required:true};
+ status={...status,api_version:'2026-11-oi5',restart_required:true};
  await vm.runInContext('refresh()',context);
  assert.match(elements.get('historyFeedback').textContent,/업데이트한 Python/);
- console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards and protective-stop controls passed.');
+ console.log('Dashboard controller: loading, inline failure, retry availability and chart render, VWAP overlay, checkbox serialization and time-series flow, partial VWAP diagnostics and old-server guards and protective-stop controls and OI observer render passed.');
 })().catch(error=>{console.error(error);process.exitCode=1});

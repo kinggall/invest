@@ -161,7 +161,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-risk4')
+        self.assertEqual(status['api_version'],'2026-11-oi5')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):
@@ -212,5 +212,29 @@ class DashboardTests(unittest.TestCase):
             self.app.action('start',{})
             factory.return_value.risk.reset.assert_called_once()
             self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
+
+    def test_oi_lookup_is_independent_and_persists_only_observer_settings(self):
+        with patch.object(d,'OIService') as provider,patch.object(self.app,'engine',side_effect=AssertionError('Trading engine must not be used')):
+            provider.return_value.collect.return_value={'expiry':'202612','observed_at':'2026-11-16T10:00:00+09:00','cached':False}
+            self.app.action('oi_start',{'expiry':'','radius_pct':5})
+            self.app.oi_thread.join(2)
+            self.assertEqual(self.app.oi_job['state'],'succeeded')
+            self.assertTrue(self.app.oi_active)
+            self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
+            self.app.action('oi_stop',{})
+            self.assertFalse(self.app.oi_active)
+        with self.app.db() as db:
+            value=json.loads(db.execute('SELECT value FROM settings WHERE id=3').fetchone()[0])
+        self.assertEqual(value,{'expiry':'','radius_pct':5})
+
+    def test_oi_error_stops_only_observer_not_trading_or_protection(self):
+        self.app.enabled=True;self.app.risk_active=True
+        with patch.object(d,'OIService') as provider:
+            provider.return_value.collect.side_effect=TradingError('OI_QUOTE_REJECTED')
+            self.app.action('oi_start',{'expiry':'','radius_pct':5})
+            self.app.oi_thread.join(2)
+        self.assertEqual(self.app.oi_job['state'],'failed')
+        self.assertFalse(self.app.oi_active)
+        self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
 
 if __name__=='__main__':unittest.main()
