@@ -261,7 +261,7 @@ class Dashboard:
 
     def run_replay(self,value,cfg):
         try:
-            result=replay(self.state,value.get('date'),cfg,value.get('capital',10000000),value.get('mode','auto'),self.replay_progress)
+            result=replay(self.state,value.get('date'),cfg,value.get('capital',10000000),value.get('mode','auto'),self.replay_progress,options=value.get('options'))
             with self.lock:
                 self.replay_result=result;self.replay_job=dict(state='succeeded',message='저장 자료 백테스트/재생 완료'+(' · 필요 자료 동시 충족 0건: 성과 판단 보류' if not result['ready_samples'] else ''))
         except Exception as exc:

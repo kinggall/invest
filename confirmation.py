@@ -17,7 +17,7 @@ def age(stamp,now):
     except (TypeError,ValueError):return None
 
 
-def assess(snapshot=None,oi=None,now=None):
+def assess(snapshot=None,oi=None,now=None,require_macd=True):
     now=now or datetime.now(KST);snapshot=snapshot or {};oi=oi or {}
     result=dict(observed_at=now.isoformat(),symbol=TRADE_SYMBOL,basis='KODEX 200 ETF 확정 3분봉',execution='OBSERVE_ONLY',
         macd=dict(state='UNKNOWN'),vwap=dict(state='UNKNOWN'),flow=dict(state='UNKNOWN'),walls=dict(state='UNKNOWN'),
@@ -37,7 +37,8 @@ def assess(snapshot=None,oi=None,now=None):
         above=last['macd']>last['signal']
         state='상향 교차' if last.get('cross')=='buy' else '하향 교차' if last.get('cross')=='sell' else '상방 우위' if above else '하방 우위'
         result['macd']=dict(periods=snapshot.get('periods'),state=state,improving=improving,above_signal=above,histogram=last['histogram'],previous_histogram=previous['histogram'],bar_end=last['end'])
-    else:result['reasons'].append('ETF MACD 준비/최신 확정봉 확인 필요')
+    elif require_macd:result['reasons'].append('ETF MACD 준비/최신 확정봉 확인 필요')
+    if not require_macd and (not source_ok or not contiguous):result['reasons'].append('ETF 최신 연속 확정봉 확인 필요')
     if source_ok and numeric(last.get('vwap')) and last['vwap']>0 and numeric(last.get('close')) and numeric(last.get('vwap_change')):
         above=last['close']>last['vwap'];rising=last['vwap_change']>0
         result['vwap']=dict(state='VWAP 위' if above else 'VWAP 아래/동일',above=above,rising=rising,value=last['vwap'],price=last['close'],distance_pct=(last['close']/last['vwap']-1)*100,bar_end=last['end'])
@@ -70,7 +71,7 @@ def assess(snapshot=None,oi=None,now=None):
         if not complete:result['reasons'].append('OI 범위 수집 미완료 · 임시 후보')
     else:result['reasons'].append('최근 수신된 양쪽 OI 후보 확인 필요')
     if not result['reasons']:
-        supportive=result['macd']['improving'] and result['vwap']['above'] and result['vwap']['rising'] and result['flow']['positive']
+        supportive=(not require_macd or result['macd'].get('improving')) and result['vwap']['above'] and result['vwap']['rising'] and result['flow']['positive']
         result.update(status='SUPPORTIVE' if supportive else 'MIXED',message='상승 보조조건 일치 · 매수 주문 신호 아님' if supportive else '보조조건 혼재 · 항목별 확인')
     else:result['message']='판단 보류 · '+ ' / '.join(result['reasons'])
     return result

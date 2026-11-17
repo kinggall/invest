@@ -196,3 +196,12 @@ class PaperTests(unittest.TestCase):
         result=self.book.view()
         self.assertEqual(len(result['events']),1)
         self.assertEqual(result['events'][0]['reason'],'REBOUND_ENTRY')
+
+    def test_replay_can_disable_breakout_add_without_altering_other_models(self):
+        self.book.options['breakout_add']=False
+        entry,after=self.breakout()
+        self.assertFalse(after['state']['position']['added'])
+        self.assertFalse(any(e['reason']=='BREAKOUT_ADD' for e in after['events']))
+        other=WallPaper(':memory:')
+        try:self.assertTrue(other.options['breakout_add'])
+        finally:other.close()

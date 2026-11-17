@@ -109,3 +109,59 @@ class ReplayTests(unittest.TestCase):
 
     def test_future_date_is_rejected_before_data_access(self):
         with self.assertRaisesRegex(TradingError,'미래 날짜'):replay(self.path,'2099-01-01',DEFAULT)
+
+    def test_macd_exclusion_is_compared_on_same_frames_without_mutating_source(self):
+        for offset in (0,3):
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now)
+            etf['chart'][-1].update(macd=-1,signal=3,histogram=-4)
+            etf['chart'][-2]['histogram']=-2
+            capture(self.book.db,etf,oi,quote,now)
+        before=hashlib.sha256(self.path.read_bytes()).hexdigest()
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(macd_filter=False))
+        self.assertEqual(result['comparison'][0]['buy_count'],0)
+        self.assertEqual(result['comparison'][1]['buy_count'],1)
+        self.assertFalse(result['options']['macd_filter'])
+        self.assertEqual(result['events'][0]['rules']['macd_filter'],False)
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)
+        self.assertEqual(self.book.options['macd_filter'],True)
+
+    def test_disabled_macd_does_not_require_macd_warmup_but_keeps_price_freshness(self):
+        for offset in (0,3):
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now)
+            etf['bars']=2
+            for row in etf['chart']:
+                for key in ('macd','signal','histogram'):row.pop(key,None)
+            capture(self.book.db,etf,oi,quote,now)
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(macd_filter=False))
+        self.assertEqual(result['buy_count'],1);self.assertEqual(result['comparison'][0]['ready_samples'],0)
+        etf,oi,quote=self.frame(self.start)
+        etf['chart'][-1]['end']=(self.start-timedelta(minutes=10)).isoformat()
+        from confirmation import assess
+        self.assertEqual(assess(etf,oi,self.start,require_macd=False)['status'],'WAITING')
+
+    def test_two_bar_window_can_enter_on_second_confirmation(self):
+        for offset in (0,3,6):
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now)
+            if offset==3:etf['chart'][-1].update(close=9980,low=9970)
+            if offset==6:
+                etf['chart'][-2].update(high=10020,histogram=5)
+                etf['chart'][-1].update(close=10030,high=10040,macd=9,signal=1,histogram=8)
+            capture(self.book.db,etf,oi,quote,now)
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(rebound_bars=2))
+        self.assertEqual(result['comparison'][0]['buy_count'],0);self.assertEqual(result['buy_count'],1)
+        self.assertEqual(result['events'][0]['time'],(self.start+timedelta(minutes=6)).isoformat())
+
+    def test_vwap_size_switch_changes_budget_without_changing_live_defaults(self):
+        for offset in (0,3):
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now)
+            etf['chart'][-1]['vwap']=11000
+            capture(self.book.db,etf,oi,quote,now)
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(vwap_sizing=False))
+        baseline=result['comparison'][0]
+        self.assertGreater(result['ending_quantity'],baseline['ending_quantity'])
+        self.assertEqual(self.book.options['vwap_sizing'],True)
+
+    def test_replay_option_validation(self):
+        from wall_paper import strategy_options
+        for bad in (True,{'macd_filter':'false'},{'rebound_bars':4},{'rebound_bars':True},{'unknown':True}):
+            with self.assertRaises(TradingError):strategy_options(bad)

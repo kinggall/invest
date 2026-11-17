@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 import sqlite3
 from oi import first_candidates,PRIMARY_RADIUS,PRIMARY_STRENGTH
-from confirmation import assess,age,numeric
+from confirmation import age,numeric
 from instruments import TRADE_SYMBOL
 from signals import aggregate,session_vwap,macd
 from trader import KST,TradingError,integer
-from wall_paper import WallPaper,RULES
+from wall_paper import WallPaper,RULES,strategy_options
 
 
 def ensure_observations(db):
@@ -107,17 +107,28 @@ def minute_frames(source,cfg):
         known.append(row)
 
 
-def replay(database,date,cfg,capital=10000000,mode='auto',progress=None):
+def replay(database,date,cfg,capital=10000000,mode='auto',progress=None,options=None):
     progress=progress or (lambda message:None)
     try:parsed=datetime.strptime(date,'%Y-%m-%d').date()
     except (ValueError,TypeError):raise TradingError('백테스트 날짜는 YYYY-MM-DD 형식으로 선택하세요.') from None
     if parsed>datetime.now(KST).date():raise TradingError('미래 날짜는 재생할 수 없습니다.')
     if mode not in ('auto','recorded','minute'):raise TradingError('REPLAY_MODE_INVALID')
     capital=integer(capital,'REPLAY_CAPITAL',100000)
+    selected=strategy_options(options)
     progress('저장된 OI·수급·ETF 자료를 읽는 중…')
     source=load_sources(database,date,mode)
-    frames=source['frames'] if source['mode']=='recorded' else minute_frames(source,cfg)
-    model=WallPaper(':memory:');model.reset(capital)
+    frames=list(source['frames'] if source['mode']=='recorded' else minute_frames(source,cfg))
+    result=evaluate_frames(source,frames,parsed,capital,selected,progress)
+    baseline=result if selected==strategy_options() else evaluate_frames(source,frames,parsed,capital,strategy_options(),progress)
+    fields=('net_pnl','return_pct','buy_count','sell_count','max_drawdown_pct','fees','ending_quantity','ready_samples','samples')
+    result['comparison']=[dict(label='기본 조건',options=strategy_options(),**{k:baseline[k] for k in fields}),
+                          dict(label='선택 조건',options=selected,**{k:result[k] for k in fields})]
+    return result
+
+
+def evaluate_frames(source,frames,parsed,capital,options,progress):
+    date=parsed.isoformat()
+    model=WallPaper(':memory:',options=options);model.reset(capital)
     counts=Counter();curve=[];chart={};seen_periods=set();first=last=None;ready=0;manual=0;warnings=[];oi_times=set();flow_times=set();ready_first=ready_last=None
     try:
         for i,frame in enumerate(frames):
@@ -125,7 +136,7 @@ def replay(database,date,cfg,capital=10000000,mode='auto',progress=None):
             if now.date()!=parsed:continue
             # No manual exit or live-ledger state is imported: this is a new strategy run.
             result=model.step(etf,oi,quote,now=now)
-            counts[result['state']['status']]+=1;is_ready=assess(etf,oi,now)['status']!='WAITING';ready+=is_ready;manual+=bool(frame.get('manual'))
+            counts[result['state']['status']]+=1;is_ready=model.confirmation(etf,oi,now)['status']!='WAITING';ready+=is_ready;manual+=bool(frame.get('manual'))
             if is_ready:ready_first=ready_first or now.isoformat();ready_last=now.isoformat()
             if oi.get('observed_at'):oi_times.add(oi['observed_at'])
             if (etf.get('flow') or {}).get('observed_at'):flow_times.add(etf['flow']['observed_at'])
@@ -160,5 +171,5 @@ def replay(database,date,cfg,capital=10000000,mode='auto',progress=None):
             valuation_at=result['state'].get('mark_at'),oi_first=min(oi_times) if oi_times else None,oi_last=max(oi_times) if oi_times else None,flow_first=min(flow_times) if flow_times else None,flow_last=max(flow_times) if flow_times else None,ready_first=ready_first,ready_last=ready_last,
             ending_quantity=result['quantity'],position=result['state']['position'],max_drawdown_pct=drawdown,round_trips=len(completed),win_rate_pct=sum(t['pnl']>0 for t in completed)/len(completed)*100 if completed else None,
             buy_count=sum(e['side']=='buy' for e in events),sell_count=sum(e['side']=='sell' for e in events),events=events,curve=curve,chart=list(sorted(chart.values(),key=lambda b:b['time'])),
-            periods=[list(p) for p in sorted(seen_periods)],manual_inputs_ignored=manual,warnings=warnings,rules=RULES)
+            periods=[list(p) for p in sorted(seen_periods)],manual_inputs_ignored=manual,warnings=warnings,rules=dict(RULES,**options),options=dict(options))
     finally:model.close()

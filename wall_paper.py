@@ -12,6 +12,18 @@ RULES=dict(touch_pct=.3,put_stop_pct=.3,etf_stop_pct=1,initial_pct=40,below_vwap
     target1_box_pct=60,target2_box_pct=80,sell_each_pct=30,breakout_failure_pct=.2,cooldown_minutes=15,max_put_stops=2,
     fee_bps=ETF_FEE_BPS,slippage_bps=5,tax_bps=0,force_close='15:15',fill_model='신호 확정 후 수집한 ETF REST 현재가 · 불리한 5원 호가/수수료/슬리피지 · 호가 잔량/미체결 미재현')
 
+DEFAULT_OPTIONS=dict(macd_filter=True,vwap_sizing=True,rebound_bars=1,breakout_add=True)
+
+
+def strategy_options(value=None):
+    if value is None:return dict(DEFAULT_OPTIONS)
+    if not isinstance(value,dict) or set(value)-set(DEFAULT_OPTIONS):raise TradingError('BACKTEST_OPTIONS_INVALID')
+    result=dict(DEFAULT_OPTIONS,**value)
+    for name in ('macd_filter','vwap_sizing','breakout_add'):
+        if not isinstance(result[name],bool):raise TradingError('BACKTEST_OPTION_'+name.upper())
+    if type(result['rebound_bars']) is not int or result['rebound_bars'] not in (1,2,3):raise TradingError('BACKTEST_REBOUND_BARS_INVALID')
+    return result
+
 
 def fresh(stamp,now,seconds):
     elapsed=age(stamp,now)
@@ -34,7 +46,8 @@ def new_state(capital):
 
 
 class WallPaper:
-    def __init__(self,database):
+    def __init__(self,database,options=None):
+        self.options=strategy_options(options)
         self.db=sqlite3.connect(database,timeout=10,isolation_level=None);self.db.row_factory=sqlite3.Row
         self.db.execute('CREATE TABLE IF NOT EXISTS wall_paper_state (id INTEGER PRIMARY KEY,payload TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS wall_paper_events (event_id TEXT PRIMARY KEY,run_id TEXT,stamp TEXT,payload TEXT)')
@@ -48,7 +61,7 @@ class WallPaper:
         equity=state['cash']+q*mark if mark is not None else (state['cash'] if not q else None)
         events=[json.loads(r[0]) for r in self.db.execute('SELECT payload FROM (SELECT rowid,payload FROM wall_paper_events WHERE run_id=? ORDER BY rowid DESC LIMIT 100) ORDER BY rowid',(state['run_id'],))]
         return dict(state=state,quantity=q,average_entry=average(p),equity=equity,unrealized=q*mark-cost if q and mark else 0,
-            net_pnl=equity-state['capital'] if equity is not None else None,events=events,rules=RULES,mode='LOCAL_PAPER_ONLY',symbol=TRADE_SYMBOL)
+            net_pnl=equity-state['capital'] if equity is not None else None,events=events,rules=dict(RULES,**self.options),mode='LOCAL_PAPER_ONLY',symbol=TRADE_SYMBOL)
     def reset(self,capital):
         self.db.execute('BEGIN IMMEDIATE')
         try:
@@ -80,7 +93,7 @@ class WallPaper:
         state['fees']=round(state['fees']+fee,2)
         event=dict(id=key,time=now.isoformat(),side=side,quantity=q,price=price,reference_price=reference,fee=fee,realized=realized,reason=reason,
             spot=spot,put=p['put'],call=p['call'],target1=p['target1'],target2=p['target2'],put_stop=p['put_stop'],stop_price=p['stop_price'],
-            expiry=p['expiry'],wall_selection=p.get('wall_selection'),rules=dict(RULES),quote_observed_at=state.get('mark_at'),confirmation=confirmation,execution='LOCAL_PAPER_ONLY')
+            expiry=p['expiry'],wall_selection=p.get('wall_selection'),rules=dict(RULES,**self.options),quote_observed_at=state.get('mark_at'),confirmation=confirmation,execution='LOCAL_PAPER_ONLY')
         self.db.execute('INSERT INTO wall_paper_events VALUES (?,?,?,?)',(key,state['run_id'],now.isoformat(),json.dumps(event,ensure_ascii=False)))
         return True
     @staticmethod
@@ -97,6 +110,9 @@ class WallPaper:
             self.save(result);self.db.execute('COMMIT')
         except Exception:self.db.execute('ROLLBACK');raise
         return self.view()
+    def confirmation(self,etf,oi,now):
+        return assess(etf,oi,now,require_macd=self.options['macd_filter'])
+
     def advance(self,s,etf,oi,quote,now,force_exit):
         def wait(status,message):s.update(status=status,message=message,updated_at=now.isoformat());return s
         day=now.date().isoformat();p=s['position'];q=quantity(p)
@@ -108,7 +124,7 @@ class WallPaper:
         if not live:return wait('DATA_WAIT','현재 거래일 ETF 분봉과 최신 REST 현재가 확인 필요 · 가상 체결 보류')
         price=quote['price'];s['last_price']=price;s['mark_at']=quote['observed_at']
         spot=oi.get('spot') if fresh(oi.get('observed_at'),now,150) and numeric(oi.get('spot')) and oi['spot']>0 else None
-        confirmation=assess(etf,oi,now)
+        confirmation=self.confirmation(etf,oi,now)
         confirmation['etf_price_time']=etf.get('price_time')
         if q:
             reason=None
@@ -149,8 +165,8 @@ class WallPaper:
                     p['breakout_bar']=end
             cool=s['cooldown_until'] and datetime.fromisoformat(s['cooldown_until'])>now
             macd=confirmation['macd'];vwap=confirmation['vwap'];flow=confirmation['flow']
-            if (not p['added'] and p['breakout_count']>=2 and end==p['breakout_bar'] and fresh(end,now,90) and not cool and spot is not None and spot>p['call'] and confirmation['status']!='WAITING'
-                and macd.get('above_signal') and vwap.get('above') and flow.get('positive')):
+            if (self.options['breakout_add'] and not p['added'] and p['breakout_count']>=2 and end==p['breakout_bar'] and fresh(end,now,90) and not cool and spot is not None and spot>p['call'] and confirmation['status']!='WAITING'
+                and (not self.options['macd_filter'] or macd.get('above_signal')) and vwap.get('above') and flow.get('positive')):
                 amount=self.size(s,price,.2,p)
                 if amount and fresh(end,datetime.fromisoformat(quote['observed_at']),90):
                     self.event(s,p,'BREAKOUT_ADD','buy',amount,price,spot,now,confirmation);p['added']=True
@@ -170,17 +186,22 @@ class WallPaper:
         if armed:
             if spot is None or spot<=put*.997:s['armed']=None;return wait('ARM_CANCELLED','대기 중 풋월 지지 실패')
             elapsed=age(armed['at'],now)
-            if elapsed is None or elapsed>360:s['armed']=None;return wait('ARM_EXPIRED','반등 확인 대기 만료 · 새 접근 필요')
+            if elapsed is None or elapsed>180*(self.options['rebound_bars']+1):s['armed']=None;return wait('ARM_EXPIRED','반등 확인 대기 만료 · 새 접근 필요')
             end=last.get('end');after=age(armed['at'],datetime.fromisoformat(end)) if end else None
             expected=(datetime.fromisoformat(armed['at']).replace(minute=datetime.fromisoformat(armed['at']).minute//3*3,second=0,microsecond=0)+timedelta(minutes=3)).isoformat()
-            if end and end>expected:
+            deadline=(datetime.fromisoformat(expected)+timedelta(minutes=3*(self.options['rebound_bars']-1))).isoformat()
+            if end and end>deadline:
                 s['armed']=None;return wait('ARM_EXPIRED','접근 직후 확인할 확정봉을 놓쳤습니다. 새 접근부터 관측합니다.')
             if after is not None and after>0:
+                if armed.get('checked_bar')==end:return wait('REBOUND_WAIT','같은 확정봉 재판단 없이 다음 봉 대기')
+                armed['checked_bar']=end
+                if not (numeric(previous.get('high')) and numeric(last.get('close')) and last['close']>previous['high']
+                        and (not self.options['macd_filter'] or confirmation['macd'].get('improving'))):
+                    if end>=deadline:s['armed']=None
+                    return wait('REBOUND_WAIT','확정봉 고가 돌파 또는 선택한 MACD 조건 미충족')
                 s['armed']=None
-                if not (numeric(previous.get('high')) and numeric(last.get('close')) and last['close']>previous['high'] and confirmation['macd'].get('improving')):
-                    return wait('REBOUND_WAIT','접근 후 다음 확정봉의 고가 돌파/히스토그램 개선 미충족')
                 if not fresh(end,datetime.fromisoformat(quote['observed_at']),90):return wait('DATA_WAIT','신호 확정 후 가상 체결 시세 확인 필요')
-                fraction=.4 if confirmation['vwap'].get('above') else .2;amount=self.size(s,price,fraction)
+                fraction=.4 if not self.options['vwap_sizing'] or confirmation['vwap'].get('above') else .2;amount=self.size(s,price,fraction)
                 if not amount:return wait('NO_BUDGET','가상 자금/정수 수량 부족')
                 position=dict(id=uuid.uuid4().hex,wall_selection=oi.get('wall_selection'),entry_day=day,expiry=expiry,put=put,call=call,put_stop=put*.997,
                     target1=put+(call-put)*.6,target2=put+(call-put)*.8,original_quantity=amount,lots=[],tp1=False,tp2=False,added=False,
