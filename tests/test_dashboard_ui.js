@@ -16,6 +16,12 @@ const context=vm.createContext({document,setInterval:()=>0,console,fetch:async(u
  for(const id of ['indicatorForm','flowSamples','oiHistoryChart','start','stop','strategyForm','orders','signals','backtest','riskPanel'])assert.equal(ids.has(id),false,id+' should be removed');
  assert.equal(elements.get('wallStart').disabled,false);
  assert.equal((html.match(/role="tab"/g)||[]).length,3);
+ // Quarter-hour ticks follow KST across missing bars and midnight.
+ const axis=vm.runInContext("(()=>{const svg=document.createElementNS('','svg');timeAxis(svg,[{time:'2026-11-17T09:00:00+09:00'},{time:'2026-11-17T10:00:00+09:00'}],i=>30+i*740,200);return svg})()",context);
+ const ticks=axis.children.filter(n=>n.attrs['data-time-tick']);assert.deepEqual(ticks.map(n=>n.textContent),['9시','15','30','45','10시']);assert.equal(ticks[2].attrs.x,400);
+ const nightAxis=vm.runInContext("(()=>{const svg=document.createElementNS('','svg');timeAxis(svg,[{time:'2026-11-17T23:45:00+09:00'},{time:'2026-11-18T00:15:00+09:00'}],i=>30+i*740,200);return svg})()",context);
+ assert.deepEqual(nightAxis.children.filter(n=>n.attrs['data-time-tick']).map(n=>n.textContent),['45','0시','15']);
+
  elements.get('tabOI').listeners.click();assert.equal(elements.get('panelPaper').hidden,true);assert.equal(elements.get('panelOI').hidden,false);assert.equal(elements.get('tabOI').attrs['aria-selected'],'true');
  elements.get('tabOI').listeners.keydown({key:'ArrowRight',preventDefault(){}});assert.equal(elements.get('panelReplay').hidden,false);assert.equal(elements.get('tabReplay').focused,true);
  elements.get('tabPaper').listeners.click();assert.equal(elements.get('panelPaper').hidden,false);assert.equal(elements.get('panelReplay').hidden,true);
