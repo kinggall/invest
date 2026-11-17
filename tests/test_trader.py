@@ -174,3 +174,30 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(t.safe_code({'msg_cd':'private-secret'}),'')
 
 if __name__=='__main__':unittest.main()
+
+class DemoAccountQueryTests(unittest.TestCase):
+    def client(self,responses):
+        self.calls=[]
+        def send(path,headers,payload,post):
+            self.calls.append((path,headers,payload,post))
+            return responses.pop(0)
+        client=t.DemoClient(Path('/unused'),'12345678','01',send,0)
+        client.tokens.read=lambda:('key','secret','token')
+        return client
+    def test_demo_buying_power_uses_no_margin_and_demo_tr(self):
+        c=self.client([dict(rt_cd='0',output=dict(nrcvb_buy_amt='100000',nrcvb_buy_qty='1',max_buy_qty='99'))])
+        self.assertEqual(c.buying_power('069500',78000),dict(cash=100000,quantity=1))
+        self.assertEqual(self.calls[0][1]['tr_id'],'VTTC8908R');self.assertEqual(self.calls[0][2]['ORD_DVSN'],'01')
+    def test_demo_balance_paginates_and_only_sums_target(self):
+        c=self.client([dict(rt_cd='0',output1=[dict(pdno='005930',hldg_qty='30')],output2=[dict(dnca_tot_amt='100000')],ctx_area_fk100='next'),
+                       dict(rt_cd='0',output1=[dict(pdno='069500',hldg_qty='7')],output2=[dict(dnca_tot_amt='100000')])])
+        self.assertEqual(c.balance('069500')['quantity'],7)
+        self.assertTrue(all(call[1]['tr_id']=='VTTC8434R' and not call[3] for call in self.calls))
+    def test_cancel_is_demo_post_and_real_routes_are_blocked(self):
+        c=self.client([dict(rt_cd='0',output={})]);row=dict(order_no='123',branch='001')
+        c.cancel(row);self.assertEqual(self.calls[0][1]['tr_id'],'VTTC0013U');self.assertTrue(self.calls[0][3])
+        self.assertEqual(self.calls[0][2]['QTY_ALL_ORD_YN'],'Y')
+        for path,tr in [('/uapi/domestic-stock/v1/trading/inquire-balance','TTTC8434R'),
+                        ('/uapi/domestic-stock/v1/trading/inquire-psbl-order','TTTC8908R'),
+                        ('/uapi/domestic-stock/v1/trading/order-rvsecncl','TTTC0013U')]:
+            with self.assertRaises(t.TradingError):c.request(path,tr,{},tr.endswith('U'))

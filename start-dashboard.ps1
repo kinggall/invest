@@ -68,5 +68,5 @@ if ($Diagnose) {
     exit $LASTEXITCODE
 }
 Write-Host 'Opening the invest demo dashboard at http://127.0.0.1:8766'
-Write-Host 'This app never issues tokens. Restart always begins stopped.'
+Write-Host 'KIS DEMO orders are sent only after Start. No real orders or token issuance. Restart begins stopped.'
 python (Join-Path $PSScriptRoot 'dashboard.py') --domino-home $DominoHome --state (Join-Path $PSScriptRoot 'runtime\orders.sqlite3')

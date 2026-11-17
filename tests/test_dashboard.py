@@ -238,9 +238,9 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('OI 기록',self.app.replay_job['message'])
         self.assertIsNone(self.app.replay_result)
 
-    def test_wall_simulator_starts_without_enabling_broker_orders(self):
+    def test_wall_broker_starts_without_enabling_legacy_orders(self):
         self.app.oi_active=True
-        with patch.object(d,'SharedToken'),patch.object(self.app,'client'):
+        with patch.object(d,'SharedToken'),patch.object(self.app,'client'),patch.object(d,'WallBroker'):
             self.app.action('wall_start',{})
         self.assertTrue(self.app.wall_enabled)
         self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
@@ -252,7 +252,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_wall_start_does_not_double_start_an_oi_lookup_already_running(self):
         self.app.oi_job['state']='running'
-        with patch.object(d,'SharedToken'),patch.object(self.app,'client'),patch.object(self.app,'request_oi') as request:
+        with patch.object(d,'SharedToken'),patch.object(self.app,'client'),patch.object(d.WallBroker,'start_check'),patch.object(d,'WallBroker') as broker,patch.object(self.app,'request_oi') as request:
             self.app.action('wall_start',{})
         self.assertTrue(self.app.oi_active);self.assertTrue(self.app.wall_enabled)
         request.assert_not_called()
@@ -273,7 +273,7 @@ class DashboardTests(unittest.TestCase):
         def quote(symbol):
             self.assertEqual(symbol,'069500');self.app.wall_enabled=False;return 10000
         client.quote.side_effect=quote
-        with patch.object(d,'datetime') as clock,patch.object(d,'WallPaper') as paper:
+        with patch.object(d,'datetime') as clock,patch.object(d,'WallBroker') as paper:
             clock.now.return_value=datetime(2026,11,16,10,30,tzinfo=KST)
             self.app.wall_tick({},client)
         paper.return_value.step.assert_not_called()
@@ -300,7 +300,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-replay1')
+        self.assertEqual(status['api_version'],'2026-11-demo2')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

@@ -130,8 +130,10 @@ def transport(path, headers, payload, post, *, base=BASE):
             if len(raw) > 2_000_000:
                 raise TradingError('RESPONSE_TOO_LARGE')
             data = json.loads(raw)
+            continuation=response.getheader('tr_cont','') if path in (FILLS,'/uapi/domestic-stock/v1/trading/inquire-balance') else None
         if not isinstance(data, dict):
             raise TradingError('RESPONSE_INVALID')
+        if continuation is not None:data['_tr_cont']=continuation
         return data
     except urllib.error.HTTPError as exc:
         code = ''
@@ -229,8 +231,8 @@ class DemoClient:
     def request(self, path, tr_id, payload, post=False, continuation=False):
         allowed = {'/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice': {'FHKST03010100'},
                    '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice': {'FHKST03010200'},
-                   '/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market': {'FHPTJ04030000'}, QUOTE: {'FHKST01010100'}, ORDER: {'VTTC0011U', 'VTTC0012U'}, FILLS: {'VTTC0081R'}}
-        if tr_id not in allowed.get(path, set()) or post != (path == ORDER):
+                   '/uapi/domestic-stock/v1/quotations/inquire-investor-time-by-market': {'FHPTJ04030000'}, QUOTE: {'FHKST01010100'}, ORDER: {'VTTC0011U', 'VTTC0012U'}, FILLS: {'VTTC0081R'}, '/uapi/domestic-stock/v1/trading/inquire-balance': {'VTTC8434R'}, '/uapi/domestic-stock/v1/trading/inquire-psbl-order': {'VTTC8908R'}, '/uapi/domestic-stock/v1/trading/order-rvsecncl': {'VTTC0013U'}}
+        if tr_id not in allowed.get(path, set()) or post != (path in (ORDER, '/uapi/domestic-stock/v1/trading/order-rvsecncl')):
             raise TradingError('ROUTE_BLOCKED')
         key, secret, token = self.tokens.read()  # Re-read before every call, never renew.
         headers = {'Content-Type': 'application/json; charset=utf-8', 'authorization': 'Bearer ' + token,
@@ -278,6 +280,38 @@ class DemoClient:
             raise TradingError('ORDER_RESPONSE_UNCERTAIN')
         return str(result['ODNO']), str(result.get('KRX_FWDG_ORD_ORGNO', ''))
 
+    def buying_power(self, symbol, price):
+        data=self.request('/uapi/domestic-stock/v1/trading/inquire-psbl-order','VTTC8908R',
+            dict(self.account,PDNO=symbol,ORD_UNPR=str(price),ORD_DVSN='01',CMA_EVLU_AMT_ICLD_YN='N',OVRS_ICLD_YN='N'))
+        output=data.get('output') or {}
+        return dict(cash=integer(output.get('nrcvb_buy_amt'),'CASH_BUY_AMOUNT',0),
+                    quantity=integer(output.get('nrcvb_buy_qty'),'CASH_BUY_QUANTITY',0))
+
+    def balance(self, symbol):
+        params=dict(self.account,AFHR_FLPR_YN='N',OFL_YN='',INQR_DVSN='02',UNPR_DVSN='01',
+                    FUND_STTL_ICLD_YN='N',FNCG_AMT_AUTO_RDPT_YN='N',PRCS_DVSN='00',CTX_AREA_FK100='',CTX_AREA_NK100='')
+        seen=set();quantity=0;cash=None
+        for page in range(100):
+            data=self.request('/uapi/domestic-stock/v1/trading/inquire-balance','VTTC8434R',params,continuation=bool(page))
+            for item in data.get('output1',[]):
+                if item.get('pdno')==symbol:quantity+=integer(item.get('hldg_qty'),'BALANCE_QUANTITY',0)
+            summary=data.get('output2') or []
+            if summary:cash=integer(summary[0].get('dnca_tot_amt'),'DEPOSIT',0)
+            cursor=(str(data.get('ctx_area_fk100','')).strip(),str(data.get('ctx_area_nk100','')).strip())
+            if '_tr_cont' in data and data['_tr_cont'] not in ('F','M'):
+                return dict(quantity=quantity,deposit=cash,observed_at=datetime.now(KST).isoformat())
+            if not any(cursor):
+                if data.get('_tr_cont') in ('F','M'):raise TradingError('BALANCE_CONTINUATION_MISSING')
+                return dict(quantity=quantity,deposit=cash,observed_at=datetime.now(KST).isoformat())
+            if cursor in seen:raise TradingError('BALANCE_PAGINATION_STALLED')
+            seen.add(cursor);params.update(CTX_AREA_FK100=cursor[0],CTX_AREA_NK100=cursor[1])
+        raise TradingError('BALANCE_PAGINATION_LIMIT')
+
+    def cancel(self, row):
+        return self.request('/uapi/domestic-stock/v1/trading/order-rvsecncl','VTTC0013U',
+            dict(self.account,KRX_FWDG_ORD_ORGNO=row['branch'],ORGN_ODNO=row['order_no'],
+                 ORD_DVSN='00',RVSE_CNCL_DVSN_CD='02',ORD_QTY='0',ORD_UNPR='0',QTY_ALL_ORD_YN='Y',EXCG_ID_DVSN_CD='KRX'),True)
+
     def fills(self, row):
         params = dict(self.account, INQR_STRT_DT=row['day'], INQR_END_DT=row['day'], SLL_BUY_DVSN_CD='00',
                       PDNO=row['symbol'], CCLD_DVSN='00', INQR_DVSN='00', INQR_DVSN_3='00',
@@ -315,7 +349,9 @@ class DemoClient:
                         if value is not None and math.isfinite(float(value)):amount=float(value)
                     return status, filled, amount
             cursor = (data.get('ctx_area_fk100', '').strip(), data.get('ctx_area_nk100', '').strip())
+            if '_tr_cont' in data and data['_tr_cont'] not in ('F','M'):return None
             if not any(cursor):
+                if data.get('_tr_cont') in ('F','M'):raise TradingError('FILL_CONTINUATION_MISSING')
                 return None
             if cursor in seen:
                 raise TradingError('PAGINATION_STALLED')

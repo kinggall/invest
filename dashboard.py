@@ -19,6 +19,7 @@ from instruments import PREVIOUS_SYMBOL
 from confirmation import assess
 from futures_chart import FuturesChart, session_at
 from wall_paper import WallPaper
+from wall_broker import WallBroker
 from wall_replay import replay, available_dates, ensure_observations, capture
 from signals import macd
 from history import History
@@ -26,13 +27,13 @@ from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-replay1'
+API_VERSION = '2026-11-demo2'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -60,7 +61,7 @@ class Dashboard:
         self.replay_dates=[]
         self.wall_enabled=False
         self.wall_exit_requested=False
-        self.wall_message='가상 시뮬레이션 중지 · 주문전송 없음'
+        self.wall_message='한투 모의매매 중지 · 시작하면 모의계좌로 주문합니다'
         self.enabled = False
         self.risk_active = False
         self.risk_snapshot = dict(status='DISARMED',message='손절 감시 중지')
@@ -123,7 +124,7 @@ class Dashboard:
         return dict(symbol=PREVIOUS_SYMBOL,quantity=quantity,pending=pending)
 
     def wall_status(self):
-        paper=WallPaper(self.state)
+        paper=WallBroker(self.state)
         try:return dict(paper.view(),enabled=self.wall_enabled,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=self.wall_message)
         finally:paper.close()
 
@@ -140,7 +141,7 @@ class Dashboard:
         if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):
             price=client.quote(SYMBOL)
             quote=dict(price=price,observed_at=datetime.now(KST).isoformat())
-        paper=WallPaper(self.state)
+        paper=WallBroker(self.state,client)
         try:
             with self.lock:
                 # Stop is checked again after network I/O. A stopped simulator fills nothing.
@@ -148,11 +149,14 @@ class Dashboard:
                 if source_fingerprint()!=self.source_fingerprint:
                     self.wall_enabled=False;self.wall_exit_requested=False;self.wall_message='코드 갱신 감지 · 서버 재시작 필요';return
                 observed=datetime.now(KST)
-                capture(paper.db,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
+                with self.db() as records:
+                    capture(records,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
                 if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
-                result=paper.step(snapshot,self.oi_snapshot,quote,now=observed,force_exit=self.wall_exit_requested)
-                self.wall_message=result['state']['message']
-                if self.wall_exit_requested and not result['quantity']:
+                exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot
+            result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=lambda:self.wall_enabled or self.wall_exit_requested)
+            with self.lock:
+                if self.wall_enabled or self.wall_exit_requested:self.wall_message=result['state']['message']
+                if self.wall_exit_requested and not result['quantity'] and not result.get('pending_count'):
                     self.wall_exit_requested=False;self.wall_enabled=False
         finally:paper.close()
 
@@ -389,26 +393,29 @@ class Dashboard:
                 self.replay_thread.start()
             elif command=='wall_start':
                 if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문과 손절 감시를 중지한 뒤 가상 시뮬레이션을 시작하세요.')
-                SharedToken(self.home).read();self.client()
+                SharedToken(self.home).read()
+                broker=WallBroker(self.state,self.client())
+                try:broker.start_check()
+                finally:broker.close()
                 if not self.oi_active:
                     if self.oi_job['state']=='running':self.oi_active=True
                     else:self.request_oi(self.oi_config,True)
                 self.wall_enabled=True;self.wall_exit_requested=False
-                self.wall_message='가상 시뮬레이션 시작 · OI/ETF 자료 준비 후 조건 평가 · 주문전송 없음'
+                self.wall_message='한투 모의매매 시작 · OI/ETF 자료 준비 후 신호에 따라 모의주문 전송'
                 self.last_refresh=0
             elif command=='wall_stop':
                 self.wall_enabled=False;self.wall_exit_requested=False
-                self.wall_message='시뮬레이션 일시중지 · 가상 보유 유지 · 가상 손절/청산도 중지됨'
+                self.wall_message='신규 모의주문 중지 · 기존 주문은 유지, 체결 조회 계속 · 손절 감시 중지'
             elif command=='wall_reset':
                 if self.wall_enabled or self.wall_exit_requested:raise TradingError('시뮬레이션을 먼저 중지하세요.')
-                paper=WallPaper(self.state)
+                paper=WallBroker(self.state)
                 try:paper.reset(value.get('capital',10000000))
                 finally:paper.close()
-                self.wall_message='새 가상 자금 설정됨 · 이전 거래 기록은 보존됨'
+                self.wall_message='전략 예산 설정됨 · 모의계좌 입금/초기화가 아닌 전략 한도입니다'
             elif command=='wall_close':
                 if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문을 먼저 중지하세요.')
                 self.wall_exit_requested=True;self.last_refresh=0
-                self.wall_message='가상 전량청산 요청 · 다음 유효 장중 시세까지 대기'
+                self.wall_message='모의 전량청산 요청 · 미체결 확인 후 다음 유효 장중 시세에 주문'
             elif command == 'strategy':
                 if self.enabled or self.risk_active or self.wall_enabled or self.wall_exit_requested:
                     raise TradingError('먼저 자동 실행·손절 감시·가상 시뮬레이션을 중지하세요.')
@@ -438,8 +445,24 @@ class Dashboard:
             else:
                 raise TradingError('알 수 없는 요청')
 
+    def sync_demo(self):
+        broker=WallBroker(self.state)
+        try:pending=bool(broker.pending())
+        finally:broker.close()
+        if not pending:return
+        broker=WallBroker(self.state,self.client())
+        try:
+            result=broker.sync()
+            self.wall_message=result['state']['message']
+        finally:broker.close()
+
     def worker(self):
         while not self.shutdown.wait(10):
+            if self.io_lock.acquire(blocking=False):
+                try:self.sync_demo()
+                except Exception as exc:
+                    with self.lock:self.wall_message=self.lookup_error(exc)+' · 모의체결 조회 보류'
+                finally:self.io_lock.release()
             with self.lock:
                 execute=self.enabled
                 wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
@@ -455,7 +478,7 @@ class Dashboard:
                     if is_rate_limit(exc):self.retry_after=time.monotonic()+30
                     self.enabled=False
                     self.last_message=self.lookup_error(exc)+' · 자동 실행 중지'
-                    if self.wall_enabled or self.wall_exit_requested:self.wall_message=self.lookup_error(exc)+' · 가상 체결 보류, 다음 조회 재시도'
+                    if self.wall_enabled or self.wall_exit_requested:self.wall_message=self.lookup_error(exc)+' · 모의주문/체결 확인 보류, 다음 조회 재시도'
             finally:
                 self.io_lock.release()
 
