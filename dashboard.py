@@ -60,6 +60,7 @@ class Dashboard:
         self.replay_thread=None
         self.replay_dates=[]
         self.wall_enabled=False
+        self.day_exit_armed=False
         self.wall_exit_requested=False
         self.wall_message='한투 모의매매 중지 · 시작하면 모의계좌로 주문합니다'
         self.enabled = False
@@ -125,10 +126,12 @@ class Dashboard:
 
     def wall_status(self):
         paper=WallBroker(self.state)
-        try:return dict(paper.view(),enabled=self.wall_enabled,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=self.wall_message)
+        try:return dict(paper.view(),enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=self.wall_message)
         finally:paper.close()
 
     def wall_tick(self,snapshot,client):
+        clock=datetime.now(KST)
+        if clock.weekday()<5 and (clock.hour,clock.minute)>=(15,15):return
         if source_fingerprint()!=self.source_fingerprint:
             with self.lock:
                 self.wall_enabled=False;self.wall_exit_requested=False
@@ -138,7 +141,7 @@ class Dashboard:
         if not active and not exit_requested:return
         quote={}
         now=datetime.now(KST)
-        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):
+        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30):
             price=client.quote(SYMBOL)
             quote=dict(price=price,observed_at=datetime.now(KST).isoformat())
         paper=WallBroker(self.state,client)
@@ -153,7 +156,7 @@ class Dashboard:
                     capture(records,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
                 if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
                 exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot
-            result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=lambda:self.wall_enabled or self.wall_exit_requested)
+            result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=self.demo_submission_allowed)
             with self.lock:
                 if self.wall_enabled or self.wall_exit_requested:self.wall_message=result['state']['message']
                 if self.wall_exit_requested and not result['quantity'] and not result.get('pending_count'):
@@ -400,12 +403,12 @@ class Dashboard:
                 if not self.oi_active:
                     if self.oi_job['state']=='running':self.oi_active=True
                     else:self.request_oi(self.oi_config,True)
-                self.wall_enabled=True;self.wall_exit_requested=False
+                self.wall_enabled=True;self.day_exit_armed=True;self.wall_exit_requested=False
                 self.wall_message='한투 모의매매 시작 · OI/ETF 자료 준비 후 신호에 따라 모의주문 전송'
                 self.last_refresh=0
             elif command=='wall_stop':
                 self.wall_enabled=False;self.wall_exit_requested=False
-                self.wall_message='신규 모의주문 중지 · 기존 주문은 유지, 체결 조회 계속 · 손절 감시 중지'
+                self.wall_message='신규 매매·손절 감시 중지 · 체결 조회와 15:15 당일 전량청산은 유지'
             elif command=='wall_reset':
                 if self.wall_enabled or self.wall_exit_requested:raise TradingError('시뮬레이션을 먼저 중지하세요.')
                 paper=WallBroker(self.state)
@@ -445,15 +448,29 @@ class Dashboard:
             else:
                 raise TradingError('알 수 없는 요청')
 
+    def demo_submission_allowed(self):
+        now=datetime.now(KST)
+        return ((self.wall_enabled or self.wall_exit_requested or (self.day_exit_armed and (now.hour,now.minute)>=(15,15))) and now.weekday()<5
+                and (9,0)<=(now.hour,now.minute)<(15,30)
+                and source_fingerprint()==self.source_fingerprint)
+
     def sync_demo(self):
         broker=WallBroker(self.state)
         try:pending=bool(broker.pending())
         finally:broker.close()
-        if not pending:return
+        now=datetime.now(KST)
+        closing=(self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,15)
+        if not pending and not closing:return
+        if source_fingerprint()!=self.source_fingerprint:return
         broker=WallBroker(self.state,self.client())
         try:
-            result=broker.sync()
+            if closing:
+                result=broker.step({}, {}, {},now=now,force_exit=True,
+                    may_submit=self.demo_submission_allowed)
+            else:result=broker.sync(now)
             self.wall_message=result['state']['message']
+            if self.wall_exit_requested and not result['quantity'] and not result['pending_count']:
+                self.wall_exit_requested=False;self.wall_enabled=False
         finally:broker.close()
 
     def worker(self):
@@ -465,7 +482,7 @@ class Dashboard:
                 finally:self.io_lock.release()
             with self.lock:
                 execute=self.enabled
-                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
+                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,30)
                 due=(execute or wall_due or time.monotonic()-self.last_refresh>=60) and time.monotonic()>=self.retry_after
                 lookup_running=self.lookup_job['state']=='running'
             if not due or lookup_running or not self.io_lock.acquire(blocking=False):

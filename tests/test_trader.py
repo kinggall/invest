@@ -201,3 +201,8 @@ class DemoAccountQueryTests(unittest.TestCase):
                         ('/uapi/domestic-stock/v1/trading/inquire-psbl-order','TTTC8908R'),
                         ('/uapi/domestic-stock/v1/trading/order-rvsecncl','TTTC0013U')]:
             with self.assertRaises(t.TradingError):c.request(path,tr,{},tr.endswith('U'))
+
+    def test_post_is_stopped_after_rate_gate_before_network(self):
+        c=self.client([]);c.before_order=lambda:False
+        with self.assertRaises(t.OrderNotSent):c.order(dict(symbol='069500',side='buy',quantity=1,limit_price=78000))
+        self.assertEqual(self.calls,[])

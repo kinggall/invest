@@ -38,6 +38,11 @@ class TradingError(Exception):
     pass
 
 
+class OrderNotSent(TradingError):
+    """A local guard stopped a POST before any network transmission."""
+    pass
+
+
 class RequestFailure(TradingError):
     """Only internally controlled stage names and validated KIS codes."""
     def __init__(self, stage, status=None, code=''):
@@ -227,6 +232,7 @@ class DemoClient:
         self.tokens = SharedToken(home)
         self.account = {'CANO': cano, 'ACNT_PRDT_CD': product}
         self.send, self.interval, self.last = send, interval, 0
+        self.before_order = None
 
     def request(self, path, tr_id, payload, post=False, continuation=False):
         allowed = {'/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice': {'FHKST03010100'},
@@ -240,6 +246,8 @@ class DemoClient:
         if continuation:
             headers['tr_cont'] = 'N'
         _api_gate.wait(BASE,key,self.interval)
+        if post and self.before_order is not None and not self.before_order():
+            raise OrderNotSent('ORDER_NOT_SENT: 중지 또는 정규장 종료로 전송 전 차단')
         try:
             data = self.send(path, headers, payload, post)
         except RequestFailure as exc:

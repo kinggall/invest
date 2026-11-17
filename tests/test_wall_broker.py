@@ -182,3 +182,56 @@ class BrokerTests(unittest.TestCase):
             self.assertEqual([tr for path,tr,post in calls if post],['VTTC0012U'])
             self.assertTrue(all(tr.startswith('V') for path,tr,post in calls))
         finally:book.close()
+
+    def test_day_exit_ignores_missing_indicators_and_quotes_after_1520(self):
+        self.enter();self.fill();q=self.book.view()['quantity']
+        now=self.start.replace(hour=15,minute=25,second=0)
+        v=self.book.step({}, {}, {},now=now)
+        self.assertEqual(self.client.sent[-1]['side'],'sell');self.assertEqual(self.client.sent[-1]['order_type'],'market')
+        self.assertEqual(self.client.sent[-1]['quantity'],q);self.assertEqual(v['orders'][0]['reason'],'DAY_EXIT')
+        self.assertEqual(v['quantity'],q) # Submitted is not treated as filled.
+        self.client.matches['2']=('FILLED',q,q*10000);self.client.holdings=0
+        v=self.book.step({}, {}, {},now=now+timedelta(seconds=10))
+        self.assertEqual(v['quantity'],0);self.assertEqual(v['pending_count'],0);self.assertEqual(v['state']['status'],'CLOSED_FLAT')
+
+    def test_close_cancels_recent_buy_then_sells_only_confirmed_partial_fill(self):
+        self.enter()
+        row=self.book.db.execute('SELECT id,payload FROM broker_meta').fetchone();meta=json.loads(row['payload'])
+        meta['time']=self.start.replace(hour=15,minute=14,second=55).isoformat()
+        self.book.db.execute('UPDATE broker_meta SET payload=? WHERE id=?',(json.dumps(meta),row['id']))
+        self.client.matches['1']=('PARTIAL',7,70070);self.client.holdings=7
+        now=self.start.replace(hour=15,minute=15,second=0)
+        self.book.step({}, {}, {},now=now)
+        self.assertEqual(self.client.cancelled,['1']);self.assertEqual(len(self.client.sent),1)
+        self.client.matches['1']=('CANCELLED',7,70070)
+        self.book.step({}, {}, {},now=now+timedelta(seconds=10))
+        self.assertEqual(len(self.client.sent),2);self.assertEqual(self.client.sent[-1]['quantity'],7)
+        self.assertEqual(self.client.sent[-1]['side'],'sell')
+
+    def test_full_market_exit_is_not_cancelled_during_closing_auction(self):
+        self.enter();self.fill();q=self.book.view()['quantity']
+        now=self.start.replace(hour=15,minute=19,second=0)
+        self.book.step({}, {}, {},now=now)
+        self.client.matches['2']=('PARTIAL',3,30000);self.client.holdings=q-3
+        self.book.step({}, {}, {},now=now+timedelta(minutes=5))
+        self.assertEqual(self.client.cancelled,[]);self.assertEqual(len(self.client.sent),2)
+
+    def test_after_close_residual_is_alerted_without_out_of_session_order(self):
+        self.enter();self.fill()
+        v=self.book.step({}, {}, {},now=self.start.replace(hour=15,minute=30))
+        self.assertEqual(len(self.client.sent),1);self.assertEqual(v['state']['status'],'CLOSE_FAILED')
+        self.assertIn('즉시 확인',v['state']['message'])
+
+    def test_close_unknown_order_alerts_and_does_not_blind_sell(self):
+        self.client.fail=True
+        with self.assertRaises(TradingError):self.enter()
+        v=self.book.step({}, {}, {},now=self.start.replace(hour=15,minute=16))
+        self.assertEqual(v['state']['status'],'CLOSE_BLOCKED');self.assertEqual(len(self.client.sent),1)
+
+    def test_local_preflight_block_does_not_leave_an_unknown_order(self):
+        from trader import OrderNotSent
+        def stop_before_network(strategy):raise OrderNotSent('closed')
+        self.client.order=stop_before_network
+        with self.assertRaises(OrderNotSent):self.enter()
+        v=self.book.view();self.assertEqual(v['pending_count'],0);self.assertEqual(v['quantity'],0)
+        self.assertEqual(v['orders'][0]['status'],'CANCELLED')

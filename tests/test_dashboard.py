@@ -365,4 +365,21 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(self.app.oi_active)
         self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
 
+    def test_day_close_sweep_does_not_need_indicator_or_quote_workers(self):
+        from datetime import datetime
+        from trader import KST
+        broker=Mock();broker.pending.return_value=[]
+        broker.step.return_value=dict(state=dict(message='당일 청산 확인 완료'),quantity=0,pending_count=0)
+        self.app.wall_enabled=True
+        with patch.object(d,'datetime') as clock,patch.object(d,'WallBroker',return_value=broker),patch.object(self.app,'client'),patch.object(self.app,'tick',side_effect=AssertionError('No market dependency')):
+            clock.now.return_value=datetime(2026,11,18,15,25,tzinfo=KST)
+            self.app.sync_demo()
+            self.assertEqual(broker.step.call_args.args,({}, {}, {}));self.assertTrue(broker.step.call_args.kwargs['force_exit'])
+            self.assertTrue(self.app.demo_submission_allowed())
+            self.app.wall_enabled=False;self.app.day_exit_armed=True
+            self.app.sync_demo();self.assertEqual(broker.step.call_count,2)
+            self.assertTrue(self.app.demo_submission_allowed())
+            clock.now.return_value=datetime(2026,11,18,15,30,tzinfo=KST)
+            self.assertFalse(self.app.demo_submission_allowed())
+
 if __name__=='__main__':unittest.main()

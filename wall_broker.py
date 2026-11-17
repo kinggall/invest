@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 from wall_paper import WallPaper, RULES, quantity, average
 from instruments import TRADE_SYMBOL
-from trader import Engine, TradingError, KST
+from trader import Engine, TradingError, OrderNotSent, KST
 
 
 class Intent(Exception):
@@ -22,6 +22,7 @@ class WallBroker(WallPaper):
         super().__init__(self.source.with_name(self.source.stem+'.demo.sqlite3'))
         self.source.with_name(self.source.stem+'.demo.sqlite3').chmod(0o600)
         self.client=client
+        self.may_submit=None
         self.db.execute('CREATE TABLE IF NOT EXISTS broker_meta (id TEXT PRIMARY KEY,payload TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS broker_settings (id TEXT PRIMARY KEY,payload TEXT)')
         # Reuse the durable order ledger and the existing CLI reconciliation path.
@@ -150,7 +151,12 @@ class WallBroker(WallPaper):
                 self.db.execute('COMMIT')
             except Exception:self.db.execute('ROLLBACK');raise
             # A durable cancellation intent prevents duplicate POSTs after a crash.
-            if allow_cancel and not terminal and not meta.get('cancel_requested') and (now-datetime.fromisoformat(meta['time'])).total_seconds()>=30:
+            closing=(now.hour,now.minute)>=(15,15)
+            strategy=json.loads(row['strategy'])
+            full_market_exit=(strategy['side']=='sell' and strategy.get('order_type')=='market'
+                              and row['quantity']-filled==quantity(self.load()['position']))
+            cancel_due=(closing and not full_market_exit) or (not closing and (now-datetime.fromisoformat(meta['time'])).total_seconds()>=30)
+            if allow_cancel and not terminal and not meta.get('cancel_requested') and cancel_due:
                 self.db.execute('BEGIN IMMEDIATE')
                 try:
                     meta=json.loads(self.db.execute('SELECT payload FROM broker_meta WHERE id=?',(row['run_id'],)).fetchone()[0])
@@ -160,7 +166,13 @@ class WallBroker(WallPaper):
                         self.db.execute('UPDATE broker_meta SET payload=? WHERE id=?',(json.dumps(meta),row['run_id']))
                     self.db.execute('COMMIT')
                 except Exception:self.db.execute('ROLLBACK');raise
-                if cancel:self.client.cancel(row)
+                if cancel:
+                    self.client.before_order=self.may_submit
+                    try:self.client.cancel(row)
+                    except OrderNotSent:
+                        meta['cancel_requested']=False
+                        self.db.execute('UPDATE broker_meta SET payload=? WHERE id=?',(json.dumps(meta),row['run_id']))
+                        raise
         if changed:
             balance=self.client.balance(TRADE_SYMBOL)
             self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('balance',?)",(json.dumps(balance),))
@@ -169,16 +181,35 @@ class WallBroker(WallPaper):
     def step(self,snapshot,oi,quote,now=None,force_exit=False,may_submit=None):
         if self.client is None:raise TradingError('DEMO_CLIENT_REQUIRED')
         now=now or datetime.now(KST)
-        self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
-        if self.pending():
-            state=self.load();state.update(status='ORDER_PENDING',message='미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
+        self.may_submit=may_submit
+        self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30) and (may_submit is None or may_submit())))
+        regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30)
+        closing=now.weekday()<5 and (now.hour,now.minute)>=(15,15)
+        pending=self.pending()
+        if closing and not regular:
+            state=self.load();unresolved=bool(quantity(state['position']) or pending)
+            state.update(status='CLOSE_FAILED' if unresolved else 'CLOSED_FLAT',
+                message='당일 청산 미완료 · 잔여 보유/미확인 주문을 한투 모의계좌에서 즉시 확인하세요' if unresolved else '당일 청산 확인 완료 · 보유 0 / 미체결 0',updated_at=now.isoformat())
+            self.save(state);return self.view()
+        if pending:
+            blocked=closing and any(not row['order_no'] for row in pending)
+            state=self.load();state.update(status='CLOSE_BLOCKED' if blocked else 'ORDER_PENDING',
+                message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
             return self.view()
         self.db.execute('BEGIN IMMEDIATE')
         intent=None
         try:
             state=self.load()
             try:
-                state=self.advance(state,snapshot or {},oi or {},quote or {},now,force_exit)
+                if regular and (closing or force_exit):
+                    # Closing must not depend on ETF warm-up, OI, flow or REST quotes.
+                    position=state['position'];amount=quantity(position)
+                    if amount:
+                        reference=state.get('last_price') or average(position)
+                        raise Intent(state,position,'DAY_EXIT' if closing else 'MANUAL_EXIT','sell',amount,reference,None,now,{})
+                    state.update(armed=None,status='CLOSED_FLAT' if closing else 'FLAT',
+                        message='당일 청산 확인 완료 · 보유 0 / 미체결 0' if closing else '보유 없음',updated_at=now.isoformat())
+                else:state=self.advance(state,snapshot or {},oi or {},quote or {},now,force_exit)
             except Intent as signal:
                 intent=signal.value;state=intent['state']
             self.save(state);self.db.execute('COMMIT')
@@ -212,7 +243,17 @@ class WallBroker(WallPaper):
             self.db.execute('INSERT INTO broker_meta VALUES (?,?)',(run_id,json.dumps(intent)))
             self.db.execute('COMMIT')
         except Exception:self.db.execute('ROLLBACK');raise
-        number,branch=self.client.order(strategy)
+        self.client.before_order=may_submit
+        try:number,branch=self.client.order(strategy)
+        except OrderNotSent:
+            intent['settled']=True
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                self.db.execute("UPDATE orders SET status='CANCELLED' WHERE run_id=?",(run_id,))
+                self.db.execute('UPDATE broker_meta SET payload=? WHERE id=?',(json.dumps(intent),run_id))
+                self.db.execute('COMMIT')
+            except Exception:self.db.execute('ROLLBACK');raise
+            raise
         self.db.execute("UPDATE orders SET status='SUBMITTED',order_no=?,branch=? WHERE run_id=?",(number,branch,run_id))
         state=self.load();state.update(status='SUBMITTED',message='한투 모의주문 접수 · 체결 확인 대기',updated_at=now.isoformat());self.save(state)
         return self.view()
