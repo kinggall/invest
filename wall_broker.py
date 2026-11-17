@@ -182,8 +182,8 @@ class WallBroker(WallPaper):
         if self.client is None:raise TradingError('DEMO_CLIENT_REQUIRED')
         now=now or datetime.now(KST)
         self.may_submit=may_submit
-        self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30) and (may_submit is None or may_submit())))
-        regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30)
+        self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
+        regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
         closing=now.weekday()<5 and (now.hour,now.minute)>=(15,15)
         pending=self.pending()
         if closing and not regular:
@@ -193,8 +193,9 @@ class WallBroker(WallPaper):
             self.save(state);return self.view()
         if pending:
             blocked=closing and any(not row['order_no'] for row in pending)
-            state=self.load();state.update(status='CLOSE_BLOCKED' if blocked else 'ORDER_PENDING',
-                message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
+            late=closing and (now.hour,now.minute)>=(15,19)
+            state=self.load();state.update(status='CLOSE_BLOCKED' if blocked else 'CLOSE_DELAYED' if late else 'ORDER_PENDING',
+                message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else '15:19 청산 기한 초과 · 미체결 즉시 확인 · 잔여 청산 진행' if late else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
             return self.view()
         self.db.execute('BEGIN IMMEDIATE')
         intent=None

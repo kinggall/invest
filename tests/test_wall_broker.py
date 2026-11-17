@@ -183,9 +183,9 @@ class BrokerTests(unittest.TestCase):
             self.assertTrue(all(tr.startswith('V') for path,tr,post in calls))
         finally:book.close()
 
-    def test_day_exit_ignores_missing_indicators_and_quotes_after_1520(self):
+    def test_day_exit_ignores_missing_indicators_and_quotes_before_1519(self):
         self.enter();self.fill();q=self.book.view()['quantity']
-        now=self.start.replace(hour=15,minute=25,second=0)
+        now=self.start.replace(hour=15,minute=18,second=0)
         v=self.book.step({}, {}, {},now=now)
         self.assertEqual(self.client.sent[-1]['side'],'sell');self.assertEqual(self.client.sent[-1]['order_type'],'market')
         self.assertEqual(self.client.sent[-1]['quantity'],q);self.assertEqual(v['orders'][0]['reason'],'DAY_EXIT')
@@ -235,3 +235,21 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(OrderNotSent):self.enter()
         v=self.book.view();self.assertEqual(v['pending_count'],0);self.assertEqual(v['quantity'],0)
         self.assertEqual(v['orders'][0]['status'],'CANCELLED')
+
+    def test_1519_open_exit_is_late_and_1520_never_submits_to_auction(self):
+        self.enter();self.fill();q=self.book.view()['quantity']
+        now=self.start.replace(hour=15,minute=18,second=0)
+        self.book.step({}, {}, {},now=now)
+        self.client.matches['2']=('SUBMITTED',0,None)
+        v=self.book.step({}, {}, {},now=now+timedelta(minutes=1))
+        self.assertEqual(v['state']['status'],'CLOSE_DELAYED');self.assertEqual(self.client.cancelled,[])
+        self.book.step({}, {}, {},now=now+timedelta(minutes=2))
+        self.assertEqual(len(self.client.sent),2);self.assertEqual(self.client.cancelled,[])
+        self.client.matches['2']=('FILLED',q,q*10000);self.client.holdings=0
+        v=self.book.step({}, {}, {},now=now+timedelta(minutes=12))
+        self.assertEqual(v['state']['status'],'CLOSED_FLAT');self.assertEqual(v['quantity'],0)
+
+    def test_1520_unsent_holding_never_creates_new_auction_order(self):
+        self.enter();self.fill()
+        v=self.book.step({}, {}, {},now=self.start.replace(hour=15,minute=20))
+        self.assertEqual(len(self.client.sent),1);self.assertEqual(v['state']['status'],'CLOSE_FAILED')

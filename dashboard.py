@@ -126,7 +126,12 @@ class Dashboard:
 
     def wall_status(self):
         paper=WallBroker(self.state)
-        try:return dict(paper.view(),enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=self.wall_message)
+        try:
+            result=paper.view();now=datetime.now(KST);message=self.wall_message
+            if (self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,19) and (result['quantity'] or result['pending_count']):
+                result['state']['status']='CLOSE_DELAYED' if (now.hour,now.minute)<(15,20) else 'CLOSE_FAILED'
+                message='15:19 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 즉시 확인하세요'
+            return dict(result,enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=message)
         finally:paper.close()
 
     def wall_tick(self,snapshot,client):
@@ -141,7 +146,7 @@ class Dashboard:
         if not active and not exit_requested:return
         quote={}
         now=datetime.now(KST)
-        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,30):
+        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):
             price=client.quote(SYMBOL)
             quote=dict(price=price,observed_at=datetime.now(KST).isoformat())
         paper=WallBroker(self.state,client)
@@ -451,7 +456,7 @@ class Dashboard:
     def demo_submission_allowed(self):
         now=datetime.now(KST)
         return ((self.wall_enabled or self.wall_exit_requested or (self.day_exit_armed and (now.hour,now.minute)>=(15,15))) and now.weekday()<5
-                and (9,0)<=(now.hour,now.minute)<(15,30)
+                and (9,0)<=(now.hour,now.minute)<(15,20)
                 and source_fingerprint()==self.source_fingerprint)
 
     def sync_demo(self):
@@ -482,7 +487,7 @@ class Dashboard:
                 finally:self.io_lock.release()
             with self.lock:
                 execute=self.enabled
-                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,30)
+                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
                 due=(execute or wall_due or time.monotonic()-self.last_refresh>=60) and time.monotonic()>=self.retry_after
                 lookup_running=self.lookup_job['state']=='running'
             if not due or lookup_running or not self.io_lock.acquire(blocking=False):
