@@ -19,19 +19,20 @@ from instruments import PREVIOUS_SYMBOL
 from confirmation import assess
 from futures_chart import FuturesChart, session_at
 from wall_paper import WallPaper
+from wall_replay import replay, available_dates, ensure_observations, capture
 from signals import macd
 from history import History
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-rate1'
+API_VERSION = '2026-11-replay1'
 
 
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -53,6 +54,10 @@ class Dashboard:
         self.future_job=dict(state='idle',message='선물 주간/야간 실제 분봉 조회 대기')
         self.last_future=0
         self.future_thread=None
+        self.replay_result=None
+        self.replay_job=dict(state='idle',message='저장 자료가 있는 거래일을 선택하세요.')
+        self.replay_thread=None
+        self.replay_dates=[]
         self.wall_enabled=False
         self.wall_exit_requested=False
         self.wall_message='가상 시뮬레이션 중지 · 주문전송 없음'
@@ -84,7 +89,8 @@ class Dashboard:
         with self.db() as db:
             saved=db.execute('SELECT value FROM settings WHERE id=3').fetchone()
         self.oi_config=oi_settings(json.loads(saved[0])) if saved else dict(expiry='',radius_pct=5)
-        paper=WallPaper(self.state);paper.close()
+        paper=WallPaper(self.state);ensure_observations(paper.db);paper.close()
+        self.replay_dates=available_dates(self.state)
         self.state.chmod(0o600)
 
     @contextmanager
@@ -141,7 +147,10 @@ class Dashboard:
                 if not self.wall_enabled and not self.wall_exit_requested:return
                 if source_fingerprint()!=self.source_fingerprint:
                     self.wall_enabled=False;self.wall_exit_requested=False;self.wall_message='코드 갱신 감지 · 서버 재시작 필요';return
-                result=paper.step(snapshot,self.oi_snapshot,quote,force_exit=self.wall_exit_requested)
+                observed=datetime.now(KST)
+                capture(paper.db,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
+                if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
+                result=paper.step(snapshot,self.oi_snapshot,quote,now=observed,force_exit=self.wall_exit_requested)
                 self.wall_message=result['state']['message']
                 if self.wall_exit_requested and not result['quantity']:
                     self.wall_exit_requested=False;self.wall_enabled=False
@@ -156,7 +165,7 @@ class Dashboard:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
             orders=[];signals=[] # Historical broker ledger is retained, not part of this page.
-            return dict(wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -210,6 +219,7 @@ class Dashboard:
                     db.execute('INSERT OR REPLACE INTO settings(id,value) VALUES (3,?)',(json.dumps(cfg),))
                 with self.lock:
                     self.oi_snapshot=snapshot;self.last_oi=time.monotonic()
+                    if snapshot.get('observed_at'):self.replay_dates=sorted(set(self.replay_dates+[snapshot['observed_at'][:10]]),reverse=True)[:90]
                     partial=not snapshot.get('future') or not snapshot.get('put_wall') or not snapshot.get('call_wall') or snapshot.get('coverage_complete') is False
                     sampling=snapshot.get('sampling') or {}
                     message=('OI 분할 갱신 · 최근 10분 근방 수신 '+str(sampling['fresh'])+'/'+str(sampling['total'])+'종목' if sampling.get('mode')=='incremental' else 'OI 조회 완료')
@@ -232,6 +242,17 @@ class Dashboard:
         self.oi_job=dict(state='running',message='실전 읽기 전용 OI 조회 준비 중…')
         self.oi_thread=threading.Thread(target=self.run_oi,args=(cfg,),daemon=True)
         self.oi_thread.start()
+
+    def replay_progress(self,message):
+        with self.lock:self.replay_job['message']=message
+
+    def run_replay(self,value,cfg):
+        try:
+            result=replay(self.state,value.get('date'),cfg,value.get('capital',10000000),value.get('mode','auto'),self.replay_progress)
+            with self.lock:
+                self.replay_result=result;self.replay_job=dict(state='succeeded',message='저장 자료 백테스트/재생 완료'+(' · 필요 자료 동시 충족 0건: 성과 판단 보류' if not result['ready_samples'] else ''))
+        except Exception as exc:
+            with self.lock:self.replay_job=dict(state='failed',message=self.lookup_error(exc))
 
     def run_future(self):
         service=None
@@ -360,6 +381,12 @@ class Dashboard:
             elif command=='oi_stop':
                 self.oi_active=False
                 self.oi_job['message']='OI 자동 기록 중지 · 진행 중인 조회는 완료될 수 있습니다.'
+            elif command=='replay':
+                if self.replay_job['state']=='running':raise TradingError('저장 자료 재생이 진행 중입니다.')
+                cfg=validate(self.strategy());self.replay_result=None
+                self.replay_job=dict(state='running',message='저장 자료 재생 준비 중…')
+                self.replay_thread=threading.Thread(target=self.run_replay,args=(dict(value),cfg),daemon=True)
+                self.replay_thread.start()
             elif command=='wall_start':
                 if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문과 손절 감시를 중지한 뒤 가상 시뮬레이션을 시작하세요.')
                 SharedToken(self.home).read();self.client()

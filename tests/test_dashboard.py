@@ -218,6 +218,26 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(self.app.oi_active)
         self.assertIn('30초',self.app.oi_job['message'])
 
+    def test_offline_replay_never_constructs_a_quote_client_or_changes_wall_state(self):
+        before=self.app.wall_status()['state']
+        result=dict(ready_samples=0,mode='minute',date='2026-11-16')
+        with patch.object(d,'replay',return_value=result) as run,patch.object(self.app,'client',side_effect=AssertionError('No network')):
+            self.app.action('replay',dict(date='2026-11-16',mode='minute',capital=10000000))
+            self.app.replay_thread.join(2)
+        self.assertEqual(self.app.replay_result,result)
+        self.assertEqual(self.app.replay_job['state'],'succeeded')
+        self.assertIn('성과 판단 보류',self.app.replay_job['message'])
+        self.assertEqual(self.app.wall_status()['state'],before)
+        run.assert_called_once()
+
+    def test_missing_replay_data_is_visible_and_retryable(self):
+        with patch.object(d,'replay',side_effect=TradingError('과거 OI 기록이 없습니다')):
+            self.app.action('replay',dict(date='2026-11-16'))
+            self.app.replay_thread.join(2)
+        self.assertEqual(self.app.replay_job['state'],'failed')
+        self.assertIn('OI 기록',self.app.replay_job['message'])
+        self.assertIsNone(self.app.replay_result)
+
     def test_wall_simulator_starts_without_enabling_broker_orders(self):
         self.app.oi_active=True
         with patch.object(d,'SharedToken'),patch.object(self.app,'client'):
@@ -280,7 +300,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-rate1')
+        self.assertEqual(status['api_version'],'2026-11-replay1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):
