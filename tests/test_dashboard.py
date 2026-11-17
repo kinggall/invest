@@ -36,7 +36,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_page_and_unconfigured_status(self):
         status,raw=self.request('/')
-        self.assertEqual(status,200);self.assertIn('주문·체결내역',raw.decode())
+        self.assertEqual(status,200);self.assertIn('가상 모의매매',raw.decode());self.assertNotIn('id="start"',raw.decode())
         with patch.dict('os.environ',{'KIS_DEMO_CANO':''}):
             status,raw=self.request('/api/status');data=json.loads(raw)
         self.assertEqual(status,200);self.assertFalse(data['enabled']);self.assertFalse(data['account_ready'])
@@ -90,7 +90,7 @@ class DashboardTests(unittest.TestCase):
                 self.assertEqual(json.loads(db.execute('SELECT value FROM settings WHERE id=4').fetchone()[0]),previous)
             self.assertEqual(restarted.previous_exposure(engine)['quantity'],2)
             with patch.object(d,'SharedToken'),patch.object(restarted,'client',return_value=broker),patch.object(restarted,'engine',return_value=engine):
-                with self.assertRaisesRegex(TradingError,'PREVIOUS_ETF_REVIEW_REQUIRED'):restarted.action('start',{})
+                with self.assertRaisesRegex(TradingError,'LEGACY_TRADING_REMOVED'):restarted.action('start',{})
             self.assertFalse(restarted.enabled)
             broker.order.assert_not_called()
         finally:engine.db.close()
@@ -256,7 +256,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-wall2')
+        self.assertEqual(status['api_version'],'2026-11-focus1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):
@@ -270,16 +270,12 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
         self.assertEqual(self.app.risk_snapshot['status'],'DISARMED')
 
-    def test_risk_monitor_does_not_wait_on_history_io_lock(self):
-        from concurrent.futures import ThreadPoolExecutor
+    def test_removed_risk_tick_cannot_access_broker_even_if_old_flags_are_set(self):
         self.app.risk_active=True
-        with patch.object(self.app,'engine') as factory:
-            factory.return_value.risk.check.return_value={'status':'WATCHING'}
-            self.app.io_lock.acquire()
-            try:
-                with ThreadPoolExecutor(max_workers=1) as pool:pool.submit(self.app.risk_tick).result(timeout=2)
-            finally:self.app.io_lock.release()
-        self.assertEqual(self.app.risk_snapshot['status'],'WATCHING')
+        with patch.object(self.app,'engine') as engine:
+            self.assertEqual(self.app.risk_tick()['status'],'REMOVED')
+            engine.assert_not_called()
+
 
     def test_stop_backtest_includes_same_cost_without_stop_controls(self):
         with patch.object(self.app,'engine'),patch.object(d,'History') as reader,patch.object(d,'simulate') as simulator:
@@ -293,20 +289,13 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(self.app.backtest['comparison']['vwap_hold']['net_pnl'],-10)
             self.assertTrue(all(call.kwargs['fee_bps']==2 for call in simulator.call_args_list))
 
-    def test_explicit_start_can_resume_latched_exit_without_new_entries(self):
-        cfg=self.app.strategy();cfg['stop_loss_enabled']=True
-        self.app.action('strategy',cfg)
-        with patch.object(d.SharedToken,'read',return_value=('k','s','t')),patch.object(self.app,'client'),patch.object(self.app,'engine') as factory:
-            factory.return_value.risk.latched.return_value=True
-            factory.return_value.risk.position.return_value={'quantity':1,'pending':[]}
-            self.app.action('start',{})
-            self.assertFalse(self.app.enabled);self.assertTrue(self.app.risk_active)
-            factory.return_value.risk.reset.assert_not_called()
-            self.app.action('stop',{})
-            factory.return_value.risk.position.return_value={'quantity':0,'pending':[]}
-            self.app.action('start',{})
-            factory.return_value.risk.reset.assert_called_once()
-            self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
+    def test_legacy_start_is_removed_even_when_token_and_position_are_valid(self):
+        with patch.object(d,'SharedToken') as token,patch.object(self.app,'engine') as engine:
+            with self.assertRaisesRegex(TradingError,'LEGACY_TRADING_REMOVED'):self.app.action('start',{})
+            token.assert_not_called();engine.assert_not_called()
+        self.assertFalse(self.app.enabled);self.assertFalse(self.app.risk_active)
+        self.assertFalse(self.app.may_submit());self.assertFalse(self.app.may_risk_submit())
+
 
     def test_oi_lookup_is_independent_and_persists_only_observer_settings(self):
         with patch.object(d,'OIService') as provider,patch.object(self.app,'engine',side_effect=AssertionError('Trading engine must not be used')):

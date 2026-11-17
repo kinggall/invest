@@ -50,12 +50,12 @@ class MacdEngine(Engine):
         if quantity < 0:raise TradingError('POSITION_RECONCILIATION_REQUIRED')
         return quantity,pending
 
-    def evaluate(self, strategy, execute=False, now=None, allow_submit=None):
+    def evaluate(self, strategy, execute=False, now=None, allow_submit=None, observe_only=False):
         cfg=validate(strategy)
         now=now or datetime.now(KST)
         # Sync first: positions are derived from confirmed fills, never order intentions.
-        fills=self.sync()
-        position,pending=self.position()
+        fills=[] if observe_only else self.sync()
+        position,pending=(0,False) if observe_only else self.position()
         flow=self.market.flow(SYMBOL,now)
         minutes=self.market.minutes(SYMBOL,now)
         latest=max((r for r in minutes if datetime.fromisoformat(r['time'])<=now),key=lambda r:r['time'],default=None)
@@ -72,6 +72,9 @@ class MacdEngine(Engine):
         last=points[-1] if points else None
         snapshot=dict(status='WARMUP', periods=[cfg['fast'],cfg['slow'],cfg['signal']],observed_at=now.isoformat(),symbol=SYMBOL,name=NAME,position=position,pending=pending,
             price_time=latest['time'] if latest else None,flow=flow,chart=points[-120:],bars=len(bars),required_bars=needed,fills=fills,submitted=False)
+        if observe_only:
+            snapshot.update(last_bar=last,status='INDICATORS_READY' if len(points)>=needed else 'WARMUP')
+            return snapshot
         if self.risk.latched():
             snapshot['status']='RISK_HALTED'
             return snapshot

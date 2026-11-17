@@ -25,7 +25,7 @@ from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-wall2'
+API_VERSION = '2026-11-focus1'
 
 
 def source_fingerprint():
@@ -154,17 +154,7 @@ class Dashboard:
             except TradingError:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
-            orders = []
-            signals = []
-            try:
-                engine = self.engine()
-                try:
-                    orders = [dict(row) for row in engine.db.execute('SELECT day,symbol,quantity,status,order_no,filled,strategy FROM orders WHERE scope=? ORDER BY rowid DESC LIMIT 100', (engine.scope,))]
-                    signals = [dict(row) for row in engine.db.execute('SELECT bar_time,side,status,value FROM signals WHERE scope=? ORDER BY bar_time DESC LIMIT 100', (engine.scope,))]
-                finally:
-                    engine.db.close()
-            except TradingError:
-                pass
+            orders=[];signals=[] # Historical broker ledger is retained, not part of this page.
             return dict(wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
@@ -183,7 +173,7 @@ class Dashboard:
             cfg=self.strategy()
         engine = self.engine()
         try:
-            result = engine.evaluate(cfg, execute, allow_submit=self.may_submit if execute else None)
+            result = engine.evaluate(cfg,False,observe_only=True)
             with self.lock:
                 self.snapshot = result
                 self.last_refresh = time.monotonic()
@@ -197,33 +187,14 @@ class Dashboard:
 
     def may_submit(self):
         # Read atomic state without holding a lock across SQLite / network work.
-        return self.enabled and not self.shutdown.is_set() and source_fingerprint()==self.source_fingerprint
+        return False # MACD-only order execution removed from this dashboard.
 
     def may_risk_submit(self):
-        return self.risk_active and not self.shutdown.is_set() and source_fingerprint()==self.source_fingerprint
+        return False # Legacy protective broker orders cannot be armed here.
 
     def risk_tick(self):
-        cfg=validate(self.strategy())
-        engine=self.engine()
-        try:
-            result=engine.risk.check(cfg,execute=True,allow_submit=self.may_risk_submit)
-            with self.lock:
-                if not self.risk_active and not result.get('submitted'):return
-                self.risk_snapshot=result
-                if result.get('latched') or result['status']=='BASIS_UNAVAILABLE':self.enabled=False
-                if result['status'] in ('COMPLETE','DISABLED'):self.risk_active=False
-        finally:engine.db.close()
-
-    def risk_worker(self):
-        # Independent of historical-download I/O. API slots / latency can extend the interval.
-        while not self.shutdown.wait(1):
-            with self.lock:active=self.risk_active
-            if not active:continue
-            try:self.risk_tick()
-            except Exception as exc:
-                with self.lock:
-                    self.enabled=False
-                    self.risk_snapshot=dict(status='ERROR',message=self.lookup_error(exc),observed_at=datetime.now(KST).isoformat(timespec='seconds'))
+        # Legacy broker-order protection is not an execution path on this page.
+        return dict(status='REMOVED')
 
     def oi_progress(self,message):
         with self.lock:self.oi_job['message']=message
@@ -427,27 +398,7 @@ class Dashboard:
                 self.lookup_thread=threading.Thread(target=self.run_lookup,args=(job_id,command,dict(value),cfg),daemon=True)
                 self.lookup_thread.start()
             elif command == 'start':
-                if self.wall_enabled or self.wall_exit_requested:raise TradingError('가상 OI 시뮬레이션을 먼저 중지하세요. 두 전략은 함께 실행하지 않습니다.')
-                SharedToken(self.home).read()
-                self.client()
-                cfg=validate(self.strategy())
-                engine=self.engine()
-                resume_exit=False
-                try:
-                    old_position=self.previous_exposure(engine)
-                    if old_position['quantity'] or old_position['pending']:
-                        raise TradingError('이전 472150의 보유/미확인 주문이 남아 있습니다. 체결 조회와 기존 주문·보유 정리를 확인한 뒤 새 종목 자동 실행을 시작하세요. [PREVIOUS_ETF_REVIEW_REQUIRED]')
-                    if engine.risk.latched():
-                        details=engine.risk.position()
-                        if details['quantity'] or details['pending']:
-                            if not cfg['stop_loss_enabled']:raise TradingError('손절 청산 미완료입니다. 손절을 켜고 감시를 재개하세요.')
-                            resume_exit=True
-                        else:engine.risk.reset()
-                finally:engine.db.close()
-                self.enabled=not resume_exit
-                self.risk_active=cfg['stop_loss_enabled']
-                self.risk_snapshot=dict(status='ARMED' if self.risk_active else 'DISABLED',percent=cfg['stop_loss_pct'],message='손절 감시 준비 중' if self.risk_active else '손절 기능 꺼짐')
-                self.last_message = '손절 청산 감시 재개 · 신규 진입 중지' if resume_exit else '자동 실행 시작 · 확정 3분봉 MACD 신호 평가 / 코스피 수급 60초 조회'
+                raise TradingError('MACD 단독 모의주문은 제거했습니다. OI 가상 시뮬레이션을 사용하세요. [LEGACY_TRADING_REMOVED]')
             elif command == 'stop':
                 self.enabled = False
                 self.risk_active=False
@@ -537,7 +488,7 @@ def main():
     app = Dashboard(args.domino_home, args.state)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(app))
     threading.Thread(target=app.worker, daemon=True).start()
-    threading.Thread(target=app.risk_worker, daemon=True).start()
+
     threading.Thread(target=app.oi_worker, daemon=True).start()
     threading.Thread(target=app.future_worker, daemon=True).start()
     url = 'http://127.0.0.1:' + str(server.server_port)

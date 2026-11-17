@@ -45,6 +45,16 @@ class StrategyTests(unittest.TestCase):
         self.engine.market.rows=self.rows[:(index+1)*3]
         return self.engine.evaluate(self.cfg,execute,now=now+timedelta(**changes))
 
+    def test_indicator_only_mode_never_syncs_or_submits_legacy_orders(self):
+        from unittest.mock import patch
+        now=self.start+timedelta(minutes=(self.buy1+1)*3,seconds=5)
+        self.engine.market.rows=self.rows[:(self.buy1+1)*3]
+        with patch.object(self.engine,'sync',side_effect=AssertionError('No legacy order sync')),patch.object(self.engine.risk,'latched',side_effect=AssertionError('No legacy protection')):
+            result=self.engine.evaluate(self.cfg,execute=True,now=now,observe_only=True)
+        self.assertEqual(result['status'],'INDICATORS_READY')
+        self.assertEqual(self.client.orders,[])
+        self.assertEqual(self.engine.db.execute('SELECT count(*) FROM signals').fetchone()[0],0)
+
     def test_buy_sell_reentry_same_day_uses_confirmed_position(self):
         self.assertTrue(self.evaluate(self.buy1)['submitted'])
         self.assertEqual(self.evaluate(self.buy1)['status'],'ORDER_PENDING')
