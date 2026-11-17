@@ -36,7 +36,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_page_and_unconfigured_status(self):
         status,raw=self.request('/')
-        self.assertEqual(status,200);self.assertIn('가상 모의매매',raw.decode());self.assertNotIn('id="start"',raw.decode())
+        self.assertEqual(status,200);self.assertIn('id="tabPaper"',raw.decode());self.assertIn('id="tabOI"',raw.decode());self.assertIn('id="tabReplay"',raw.decode());self.assertNotIn('id="start"',raw.decode())
         with patch.dict('os.environ',{'KIS_DEMO_CANO':''}):
             status,raw=self.request('/api/status');data=json.loads(raw)
         self.assertEqual(status,200);self.assertFalse(data['enabled']);self.assertFalse(data['account_ready'])
