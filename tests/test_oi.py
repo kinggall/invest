@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from oi import OIService,candidates,monthly_expiry,nearest_month,parse_index_master,parse_future_master
+from oi import OIService,candidates,first_candidates,monthly_expiry,nearest_month,parse_index_master,parse_future_master
 from trader import KST,TradingError,ReadOnlyDerivativesClient,OI_EXPIRIES,OI_OPTIONS,OI_INDEX,OI_FUTURES,OI_PRICE,FUTURES_MINUTES,ORDER,REAL_BASE,transport
 
 class Quotes:
@@ -290,6 +290,36 @@ class OITests(unittest.TestCase):
         self.assertEqual(result['sampling']['received'],12)
         self.assertIsNone(result['comparison_at'])
         self.assertTrue(all(not r['reused'] and r['observed_change'] is None for r in result['calls']+result['puts']))
+
+    def test_first_wall_is_near_material_peak_not_far_global_maximum(self):
+        # Representative neighborhood matching the screenshot's material levels.
+        puts=[dict(strike=k,oi=v) for k,v in [(750,4783),(760,600),(770,550),(772.5,20),(775,1350),(777.5,40),(780,1107),(782.5,20),(785,69)]]
+        calls=[dict(strike=k,oi=v) for k,v in [(787.5,54),(790,75),(792.5,551),(795,134),(797.5,80),(800,2537),(802.5,180),(805,250),(807.5,220),(815,1500)]]
+        self.assertEqual(candidates(puts,786.17,'put',5,None)[0]['strike'],750)
+        self.assertEqual(first_candidates(puts,786.17,'put',5,None)[0]['strike'],780)
+        self.assertEqual(first_candidates(calls,786.17,'call',5,None)[0]['strike'],800)
+        self.assertEqual(first_candidates(puts,786.17,'put',5,None)[0]['selection'],'nearest_material_peak')
+
+    def test_far_major_wall_does_not_automatically_become_a_first_wall(self):
+        rows=[dict(strike=750,oi=4783)]
+        self.assertEqual(candidates(rows,786.17,'put',5,None)[0]['strike'],750)
+        self.assertEqual(first_candidates(rows,786.17,'put',5,None),[])
+
+    def test_stale_first_peak_is_excluded_without_promoting_tiny_nearest_oi(self):
+        rows=[dict(strike=775,oi=1350),dict(strike=777.5,oi=40),dict(strike=780,oi=1107,stale=True),dict(strike=782.5,oi=20),dict(strike=785,oi=69)]
+        self.assertEqual(first_candidates(rows,786.17,'put',5,None)[0]['strike'],775)
+
+    def test_equal_height_plateau_is_one_peak_and_flat_oi_is_not_a_wall(self):
+        rows=[dict(strike=k,oi=v) for k,v in [(770,100),(775,1100),(777.5,1100),(780,50),(782.5,30)]]
+        selected=first_candidates(rows,786.17,'put',5,None)
+        self.assertEqual([r['strike'] for r in selected],[777.5])
+        self.assertEqual(first_candidates([dict(strike=k,oi=100) for k in [775,777.5,780]],786.17,'put',5,None),[])
+
+    def test_first_wall_respects_narrower_user_radius_and_correct_side(self):
+        rows=[dict(strike=780,oi=1107),dict(strike=782.5,oi=20),dict(strike=785,oi=69)]
+        self.assertEqual(first_candidates(rows,786.17,'put',1,None)[0]['strike'],780)
+        self.assertEqual(first_candidates([dict(strike=750,oi=4783)],786.17,'put',1,None),[])
+        self.assertEqual(first_candidates(rows,786.17,'call',5,None),[])
 
     def test_existing_real_token_is_unchanged_and_orders_are_blocked(self):
         (self.root/'kis_config.json').write_text(json.dumps({'profiles':{'real':{'app_key':'key','app_secret':'secret'}}}))

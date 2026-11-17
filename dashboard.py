@@ -25,7 +25,7 @@ from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-wall1'
+API_VERSION = '2026-11-wall2'
 
 
 def source_fingerprint():

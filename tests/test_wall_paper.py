@@ -170,6 +170,22 @@ class PaperTests(unittest.TestCase):
         self.assertEqual(self.book.view()['state']['capital'],20000000)
         self.assertEqual(self.book.db.execute('SELECT count(*) FROM wall_paper_events WHERE run_id=?',(old_run,)).fetchone()[0],2)
 
+    def test_new_first_wall_selection_never_rewrites_an_open_trade_box(self):
+        for offset in (0,3):
+            now=self.start+timedelta(minutes=offset)
+            etf,oi,quote=self.data(now,spot=751)
+            oi['put_wall']['strike']=750
+            oi['wall_selection']=dict(mode='old_largest')
+            before=self.book.step(etf,oi,quote,now)
+        self.assertEqual(before['state']['position']['put'],750)
+        now=self.start+timedelta(minutes=4);etf,oi,quote=self.data(now,spot=786)
+        oi['put_wall']['strike']=780
+        oi['wall_selection']=dict(mode='nearest_material_peak')
+        after=self.book.step(etf,oi,quote,now)
+        self.assertEqual(after['state']['position']['put'],750)
+        self.assertEqual(after['state']['position']['put_stop'],750*.997)
+        self.assertEqual(after['state']['position']['wall_selection']['mode'],'old_largest')
+
     def test_concurrent_rebound_evaluations_fill_only_once(self):
         self.step(self.start);now=self.start+timedelta(minutes=3)
         def run(_):

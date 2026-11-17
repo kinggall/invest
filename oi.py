@@ -16,7 +16,7 @@ from trader import KST,TradingError,ReadOnlyDerivativesClient,DERIVATIVE_READS,O
 MAX_QUOTES=12
 BATCH_SECONDS=15
 FRESH_SECONDS=600
-SAMPLING_VERSION=2
+SAMPLING_VERSION=3
 
 _MASTER_CACHE=None
 
@@ -141,6 +141,44 @@ def candidates(rows,spot,side,radius,basis):
     ranked=sorted(selected,key=lambda r:(-r['oi'],abs(r['strike']-spot),r['strike']))[:3]
     return [dict(r,local_share_pct=r['oi']/total*100,distance_pct=(r['strike']/spot-1)*100,
                  projected_future_level=r['strike']+basis if basis is not None else None) for r in ranked]
+
+
+PRIMARY_RADIUS=3.0
+PRIMARY_STRENGTH=.5
+
+
+def first_candidates(rows,spot,side,radius,basis):
+    """Nearest material OI peak, distinct from the global maximum concentration.
+
+    Same-side neighboring observed strikes define peaks; equal-height plateaus
+    form one peak, represented by the strike nearest spot. Missing/stale rows
+    do not count as zero. Coverage remains an independent admission condition.
+    """
+    if spot is None:return []
+    pool=sorted([r for r in rows if not r.get('stale',False) and r['oi']>=0 and
+        ((spot*(1-radius/100)<=r['strike']<spot) if side=='put' else (spot<r['strike']<=spot*(1+radius/100)))],key=lambda r:r['strike'])
+    near=[r for r in pool if r['oi']>0 and abs(r['strike']/spot-1)*100<=min(radius,PRIMARY_RADIUS)+1e-9]
+    if not near:return []
+    cutoff=max(r['oi'] for r in near)*PRIMARY_STRENGTH
+    groups=[]
+    for row in pool:
+        if groups and groups[-1][0]['oi']==row['oi']:groups[-1].append(row)
+        else:groups.append([row])
+    peaks=[]
+    for index,group in enumerate(groups):
+        value=group[0]['oi']
+        left=groups[index-1][0]['oi'] if index else None
+        right=groups[index+1][0]['oi'] if index+1<len(groups) else None
+        if value<cutoff or value<=0:continue
+        if left is not None and value<=left or right is not None and value<=right:continue
+        if len(groups)==1 and len(pool)>1:continue # flat OI is not a local wall
+        eligible=[r for r in group if r in near]
+        if eligible:peaks.append(min(eligible,key=lambda r:abs(r['strike']-spot)))
+    total=sum(r['oi'] for r in pool)
+    ranked=sorted(peaks,key=lambda r:(abs(r['strike']-spot),-r['oi'],r['strike']))[:3]
+    return [dict(r,local_share_pct=r['oi']/total*100,distance_pct=(r['strike']/spot-1)*100,
+        projected_future_level=r['strike']+basis if basis is not None else None,
+        selection='nearest_material_peak',strength_cutoff=cutoff,primary_radius_pct=min(radius,PRIMARY_RADIUS)) for r in ranked]
 
 
 class OIService:
@@ -287,8 +325,9 @@ class OIService:
                 watched=[]
                 if old and old.get('expiry')==expiry:
                     for side in ('put','call'):
-                        wall=old.get(side+'_wall')
-                        if wall:watched.extend(r for r in targets if r['side']==side and r['code']==wall['code'])
+                        for field in ('_wall','_major_wall'):
+                            wall=old.get(side+field)
+                            if wall:watched.extend(r for r in targets if r['side']==side and r['code']==wall['code'])
                 priorities=[]
                 for item in watched+nearest:
                     if item not in priorities:priorities.append(item)
@@ -348,15 +387,19 @@ class OIService:
         sampling=dict(mode='incremental' if incremental else 'board',total=len(targets),received=len(target_rows),fresh=sum(not r['stale'] for r in target_rows),
             updated=individual_count,attempted=attempted,max_quotes=MAX_QUOTES,budget_seconds=BATCH_SECONDS,fresh_seconds=FRESH_SECONDS)
         if targets:coverage_complete=sampling['fresh']==sampling['total']
-        put_candidates=candidates(puts,spot,'put',cfg['radius_pct'],basis)
-        call_candidates=candidates(calls,spot,'call',cfg['radius_pct'],basis)
+        put_major=candidates(puts,spot,'put',cfg['radius_pct'],basis)
+        call_major=candidates(calls,spot,'call',cfg['radius_pct'],basis)
+        put_candidates=first_candidates(puts,spot,'put',cfg['radius_pct'],basis)
+        call_candidates=first_candidates(calls,spot,'call',cfg['radius_pct'],basis)
         if not incremental and (len(calls)>=100 or len(puts)>=100):warnings.append('API는 각 측 최대 100건입니다. 수신 범위 안의 후보이며 전체 행사가를 보장하지 않습니다.')
         if skip_call+skip_put:warnings.append('행사가/OI 필드가 없는 '+str(skip_call+skip_put)+'개 행을 제외했습니다.')
-        if not put_candidates or not call_candidates:warnings.append('현재 지수의 지정 근방에서 양쪽 후보가 모두 확인되지는 않았습니다.')
+        if not put_candidates or not call_candidates:warnings.append('현재 지수 근처의 유의미한 1차 OI 봉우리가 양쪽 모두 확인되지는 않았습니다. 먼 주요 벽으로 자동 대체하지 않습니다.')
         if observed.weekday()>=5 or not ((8,45)<=(observed.hour,observed.minute)<(15,45)):
             warnings.append('정규장 외 조회입니다. 직전 장 자료일 수 있으며 원자료 갱신시각은 확인되지 않았습니다.')
         if (observed-now).total_seconds()>30:warnings.append('조회에 30초 이상 걸렸습니다. 지수·선물·OI는 동시 체결 시각 자료가 아니며 환산선은 참고값입니다.')
         snapshot=dict(collection_started_at=now.isoformat(),collection_seconds=(observed-now).total_seconds(),expiry=expiry,expiries=expiries,radius_pct=cfg['radius_pct'],observed_at=observed.isoformat(),source_time=None,
+            wall_selection=dict(mode='nearest_material_peak',primary_radius_pct=min(cfg['radius_pct'],PRIMARY_RADIUS),strength_ratio=PRIMARY_STRENGTH,major_radius_pct=cfg['radius_pct']),
+            put_major_wall=put_major[0] if put_major else None,call_major_wall=call_major[0] if call_major else None,
             sampling_version=SAMPLING_VERSION,requested_expiry=cfg['expiry'],sampling=sampling,spot=spot,future=future,basis=basis,calls=calls,puts=puts,coverage_complete=coverage_complete,individual_count=individual_count,put_candidates=put_candidates,call_candidates=call_candidates,
             put_wall=put_candidates[0] if put_candidates else None,call_wall=call_candidates[0] if call_candidates else None,
             comparison_at=previous['observed_at'] if previous else None,

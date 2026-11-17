@@ -80,7 +80,7 @@ class WallPaper:
         state['fees']=round(state['fees']+fee,2)
         event=dict(id=key,time=now.isoformat(),side=side,quantity=q,price=price,reference_price=reference,fee=fee,realized=realized,reason=reason,
             spot=spot,put=p['put'],call=p['call'],target1=p['target1'],target2=p['target2'],put_stop=p['put_stop'],stop_price=p['stop_price'],
-            expiry=p['expiry'],rules=dict(RULES),quote_observed_at=state.get('mark_at'),confirmation=confirmation,execution='LOCAL_PAPER_ONLY')
+            expiry=p['expiry'],wall_selection=p.get('wall_selection'),rules=dict(RULES),quote_observed_at=state.get('mark_at'),confirmation=confirmation,execution='LOCAL_PAPER_ONLY')
         self.db.execute('INSERT INTO wall_paper_events VALUES (?,?,?,?)',(key,state['run_id'],now.isoformat(),json.dumps(event,ensure_ascii=False)))
         return True
     @staticmethod
@@ -182,7 +182,7 @@ class WallPaper:
                 if not fresh(end,datetime.fromisoformat(quote['observed_at']),90):return wait('DATA_WAIT','신호 확정 후 가상 체결 시세 확인 필요')
                 fraction=.4 if confirmation['vwap'].get('above') else .2;amount=self.size(s,price,fraction)
                 if not amount:return wait('NO_BUDGET','가상 자금/정수 수량 부족')
-                position=dict(id=uuid.uuid4().hex,entry_day=day,expiry=expiry,put=put,call=call,put_stop=put*.997,
+                position=dict(id=uuid.uuid4().hex,wall_selection=oi.get('wall_selection'),entry_day=day,expiry=expiry,put=put,call=call,put_stop=put*.997,
                     target1=put+(call-put)*.6,target2=put+(call-put)*.8,original_quantity=amount,lots=[],tp1=False,tp2=False,added=False,
                     protected=False,stop_price=0,breakout_bar=None,breakout_count=0,armed_at=armed['at'])
                 confirmation['entry_reference']=dict(previous_high=previous['high'],bar_end=end,close=last['close'])

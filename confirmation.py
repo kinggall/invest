@@ -65,7 +65,7 @@ def assess(snapshot=None,oi=None,now=None):
             valid_walls=valid_walls and numeric(wall.get('oi')) and wall['oi']>0 and elapsed is not None and 0<=elapsed<=600
     if valid_walls:
         complete=oi.get('coverage_complete') is True
-        result['walls']=dict(state='범위 확인' if complete else '일부 수신 · 임시 후보',complete=complete,spot=spot,put=put['strike'],call=call['strike'],
+        result['walls']=dict(state='범위 확인' if complete else '일부 수신 · 임시 후보',complete=complete,selection=oi.get('wall_selection'),spot=spot,put=put['strike'],call=call['strike'],
             put_distance_pct=(spot/put['strike']-1)*100,call_distance_pct=(call['strike']/spot-1)*100,observed_at=oi['observed_at'])
         if not complete:result['reasons'].append('OI 범위 수집 미완료 · 임시 후보')
     else:result['reasons'].append('최근 수신된 양쪽 OI 후보 확인 필요')
