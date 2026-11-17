@@ -16,6 +16,11 @@ class ConfirmationTests(unittest.TestCase):
         wall=lambda strike:dict(strike=strike,oi=100,received_at=end.isoformat())
         self.oi=dict(observed_at=end.isoformat(),spot=791.56,put_wall=wall(775),call_wall=wall(800),coverage_complete=True)
 
+    def test_new_full_pass_policy_excludes_a_wall_older_than_three_minutes(self):
+        self.oi['row_fresh_seconds']=180
+        self.oi['put_wall']['received_at']=(self.now-timedelta(seconds=181)).isoformat()
+        self.assertEqual(assess(self.snapshot,self.oi,self.now)['status'],'WAITING')
+
     def test_uses_etf_bars_and_flow_changes_not_cumulative_signs(self):
         result=assess(self.snapshot,self.oi,self.now)
         self.assertEqual(result['status'],'SUPPORTIVE')

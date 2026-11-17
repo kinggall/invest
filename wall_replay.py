@@ -22,7 +22,7 @@ def capture(db,etf,oi,quote,now,manual=False):
     snap={k:etf.get(k) for k in ('symbol','price_time','bars','required_bars','periods','observed_at')}
     snap['chart']=(etf.get('chart') or [])[-2:]
     snap['flow']={k:v for k,v in (etf.get('flow') or {}).items() if k!='history'}
-    context={k:oi.get(k) for k in ('expiry','observed_at','spot','put_wall','call_wall','coverage_complete','wall_selection')}
+    context={k:oi.get(k) for k in ('expiry','observed_at','spot','put_wall','call_wall','coverage_complete','wall_selection','row_fresh_seconds')}
     frame=dict(version=1,at=now.isoformat(),etf=snap,oi=context,quote=quote,manual=bool(manual),recorded_rules=RULES)
     db.execute('INSERT OR IGNORE INTO wall_observations VALUES (?,?)',(frame['at'],json.dumps(frame,ensure_ascii=False)))
 
@@ -59,7 +59,7 @@ def reselect_snapshot(original):
         rows=[]
         for raw in snapshot[field]:
             elapsed=age(raw.get('received_at'),observed)
-            rows.append(dict(raw,stale=elapsed is None or elapsed<0 or elapsed>600))
+            rows.append(dict(raw,stale=elapsed is None or elapsed<0 or elapsed>(180 if snapshot.get('row_fresh_seconds')==180 else 600)))
         selected=first_candidates(rows,snapshot['spot'],side,radius,snapshot.get('basis'))
         snapshot[side+'_wall']=selected[0] if selected else None
     snapshot['wall_selection']=dict(mode='nearest_material_peak',primary_radius_pct=min(radius,PRIMARY_RADIUS),strength_ratio=PRIMARY_STRENGTH,major_radius_pct=radius)

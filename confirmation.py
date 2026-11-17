@@ -62,7 +62,7 @@ def assess(snapshot=None,oi=None,now=None):
         valid_walls=(numeric(put.get('strike')) and numeric(call.get('strike')) and put['strike']<spot<call['strike'])
         for wall in (put,call):
             elapsed=age(wall.get('received_at'),now)
-            valid_walls=valid_walls and numeric(wall.get('oi')) and wall['oi']>0 and elapsed is not None and 0<=elapsed<=600
+            valid_walls=valid_walls and numeric(wall.get('oi')) and wall['oi']>0 and elapsed is not None and 0<=elapsed<=(180 if oi.get('row_fresh_seconds')==180 else 600)
     if valid_walls:
         complete=oi.get('coverage_complete') is True
         result['walls']=dict(state='범위 확인' if complete else '일부 수신 · 임시 후보',complete=complete,selection=oi.get('wall_selection'),spot=spot,put=put['strike'],call=call['strike'],

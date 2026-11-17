@@ -59,6 +59,8 @@ const context=vm.createContext({document,setInterval:()=>0,console,fetch:async(u
  vm.runInContext("drawOIBars({spot:770,radius_pct:5,puts:[],calls:[{side:'call',strike:1595,oi:10000}]})",context);assert.equal(elements.get('oiRows').children.length,0);
  vm.runInContext("drawOIBars({spot:null,radius_pct:5,puts:[],calls:[{side:'call',strike:1595,oi:10000}]})",context);assert.equal(elements.get('oiRows').children.length,0);assert.match(elements.get('oiRangeNote').textContent,/현재 지수 미수신/);
  status={...status,wall_paper:{...status.wall_paper,enabled:false,day_exit_armed:true,message:'당일 청산 미완료',state:{...status.wall_paper.state,status:'CLOSE_FAILED'}}};await vm.runInContext('refresh()',context);assert.equal(elements.get('wallFeedback').className,'error');assert.match(elements.get('wallRunning').textContent,/당일 청산 확인 필요/);
+ status={...status,oi_job:{state:'running',message:'OI 전체 새 수신 4/64'}};await vm.runInContext('refresh()',context);assert.equal(elements.get('oiContent').hidden,true);assert.match(elements.get('oiObserved').textContent,/수신 중/);
+ status={...status,oi_job:{state:'succeeded',message:'OI 전체 수신 완료'}};await vm.runInContext('refresh()',context);assert.equal(elements.get('oiContent').hidden,false);
  status={...status,restart_required:true};await vm.runInContext('refresh()',context);assert.equal(elements.get('wallStart').disabled,true);assert.equal(elements.get('preview').disabled,true);const before=requests.length;await vm.runInContext("action('wall_start')",context);assert.equal(requests.length,before);
  assert.ok(requests.every(r=>r.url!='/api/start'));
  console.log('Dedicated paper page: three tabs, legacy controls absent, OI, futures, confirmation, ledger and chart markers, loading/retry and version guard passed.');

@@ -219,56 +219,68 @@ class OITests(unittest.TestCase):
         self.quotes.request=request
         return master
 
-    def test_incremental_caps_calls_and_skips_slow_boards(self):
+    def test_full_pass_fetches_every_target_and_skips_slow_boards(self):
         master=self.configure_incremental()
         with patch('oi.load_index_master',return_value=master):result=self.collect()
-        self.assertEqual(result['individual_count'],12)
+        self.assertEqual(result['individual_count'],32)
         self.assertEqual(result['sampling']['total'],32)
-        self.assertEqual(result['sampling']['fresh'],12)
-        self.assertFalse(result['coverage_complete'])
+        self.assertEqual(result['sampling']['fresh'],32)
+        self.assertTrue(result['coverage_complete'])
         self.assertFalse(any(c[0] in [OI_OPTIONS,OI_EXPIRIES,OI_FUTURES] for c in self.quotes.calls))
-        self.assertEqual(len([c for c in self.quotes.calls if c[0]==OI_PRICE]),12)
+        self.assertEqual(len([c for c in self.quotes.calls if c[0]==OI_PRICE]),32)
         self.assertIsNotNone(result['put_wall']);self.assertIsNotNone(result['call_wall'])
 
-    def test_incremental_rotates_and_persists_source_times_across_service_restarts(self):
+    def test_full_pass_refreshes_every_row_across_service_restarts(self):
         master=self.configure_incremental()
         with patch('oi.load_index_master',return_value=master):
-            first=self.collect()
-            self.service.close()
-            self.service=OIService(self.root,self.root/'state.db',self.quotes)
-            self.addCleanup(self.service.close)
+            self.collect();self.service.close()
+            self.service=OIService(self.root,self.root/'state.db',self.quotes);self.addCleanup(self.service.close)
             self.quotes.extra=10
             second=self.collect(now=self.now+timedelta(seconds=60))
-            reused=[r for r in second['calls']+second['puts'] if r['reused']]
-            self.assertTrue(reused)
-            self.assertTrue(all(r['received_at']==self.now.isoformat() and r['age_seconds']==60 and r['observed_change'] is None for r in reused))
-            refreshed=[r for r in second['calls']+second['puts'] if r['observed_change'] is not None]
-            self.assertTrue(refreshed)
-            self.assertTrue(all(r['observed_change']==10 and r['comparison_seconds']==60 for r in refreshed))
-            self.assertGreater(second['sampling']['fresh'],first['sampling']['fresh'])
-            for i in range(2,5):last=self.collect(now=self.now+timedelta(seconds=60*i))
-        self.assertEqual(last['sampling']['fresh'],32)
-        self.assertTrue(last['coverage_complete'])
+        rows=second['calls']+second['puts']
+        self.assertEqual(len(rows),32);self.assertTrue(second['coverage_complete'])
+        self.assertTrue(all(not r['reused'] and r['received_at']==(self.now+timedelta(seconds=60)).isoformat() for r in rows))
+        self.assertTrue(all(r['observed_change']==10 and r['comparison_seconds']==60 for r in rows))
 
-    def test_incremental_time_budget_stops_starting_more_requests(self):
-        master=self.configure_incremental()
-        with patch('oi.load_index_master',return_value=master),patch('oi.time.monotonic',side_effect=[0,0,16]):
-            result=self.collect()
-        self.assertEqual(result['individual_count'],1)
-        self.assertEqual(result['sampling']['attempted'],1)
-        self.assertFalse(result['coverage_complete'])
-        self.assertTrue(any('15초' in w for w in result['warnings']))
-
-    def test_old_incremental_rows_are_visible_but_not_ranked(self):
+    def test_forced_refresh_bypasses_recent_cache(self):
         master=self.configure_incremental()
         with patch('oi.load_index_master',return_value=master):
-            self.collect()
+            self.collect();before=len(self.quotes.calls)
+            result=self.service.collect(dict(expiry='',radius_pct=5),now=self.now+timedelta(seconds=30),force=True)
+        self.assertFalse(result['cached']);self.assertEqual(result['individual_count'],32)
+        self.assertGreaterEqual(len(self.quotes.calls)-before,32)
+        self.assertTrue(all(r['received_at']==(self.now+timedelta(seconds=30)).isoformat() for r in result['calls']+result['puts']))
+
+    def test_failed_refresh_does_not_restore_old_rows(self):
+        master=self.configure_incremental()
+        with patch('oi.load_index_master',return_value=master):
+            self.collect();original=self.quotes.request
+            failed_code=master[0]['code']
+            def request(path,tr,params,post=False):
+                if path==OI_PRICE and params['FID_INPUT_ISCD']==failed_code:raise TradingError('TIMEOUT')
+                return original(path,tr,params,post)
+            self.quotes.request=request
             result=self.collect(now=self.now+timedelta(seconds=700))
-        stale=[r for r in result['calls']+result['puts'] if r['stale']]
-        self.assertTrue(stale)
-        self.assertTrue(all(r['age_seconds']==700 and r['observed_change'] is None for r in stale))
-        self.assertTrue(all(not r['stale'] for r in result['put_candidates']+result['call_candidates']))
-        self.assertFalse(result['coverage_complete'])
+        rows=result['calls']+result['puts']
+        self.assertEqual(len(rows),31);self.assertFalse(any(r['code']==failed_code for r in rows))
+        self.assertTrue(all(not r['reused'] and not r['stale'] for r in rows));self.assertFalse(result['coverage_complete'])
+
+    def test_full_pass_rechecks_spot_and_blocks_shifted_universe(self):
+        master=self.configure_incremental();original=self.quotes.request;indices=[0]
+        def request(path,tr,params,post=False):
+            if path==OI_INDEX:
+                indices[0]+=1
+                return dict(output=dict(bstp_nmix_prpr='100' if indices[0]==1 else '200'))
+            return original(path,tr,params,post)
+        self.quotes.request=request
+        stamp=self.now
+        class Clock(datetime):
+            @classmethod
+            def now(cls,tz=None):return stamp
+        with patch('oi.load_index_master',return_value=master),patch('oi.datetime',Clock):
+            result=self.service.collect(dict(expiry='',radius_pct=5),force=True)
+        self.assertEqual(indices[0],2);self.assertEqual(result['spot'],200)
+        self.assertFalse(result['coverage_complete']);self.assertIsNone(result['put_wall'])
 
     def test_incremental_day_change_does_not_reuse_other_scope(self):
         master=self.configure_incremental()
@@ -277,7 +289,7 @@ class OITests(unittest.TestCase):
             self.collect()
             # Different month has no previous observation; quotes mapped for that month.
             tomorrow=self.collect(now=self.now+timedelta(days=1))
-        self.assertEqual(tomorrow['sampling']['received'],12)
+        self.assertEqual(tomorrow['sampling']['received'],32)
         self.assertTrue(all(not r['reused'] and r['observed_change'] is None for r in tomorrow['calls']+tomorrow['puts']))
 
     def test_incremental_expiry_change_does_not_reuse_other_month(self):
@@ -287,7 +299,7 @@ class OITests(unittest.TestCase):
         with patch('oi.load_index_master',return_value=master+other):
             result=self.service.collect(dict(expiry='202701',radius_pct=5),self.now+timedelta(seconds=60))
         self.assertEqual(result['expiry'],'202701')
-        self.assertEqual(result['sampling']['received'],12)
+        self.assertEqual(result['sampling']['received'],32)
         self.assertIsNone(result['comparison_at'])
         self.assertTrue(all(not r['reused'] and r['observed_change'] is None for r in result['calls']+result['puts']))
 

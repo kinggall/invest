@@ -226,7 +226,7 @@ class Dashboard:
         try:
             with self.oi_lock:
                 service=OIService(self.home,self.state,progress=self.oi_progress)
-                snapshot=service.collect(cfg)
+                snapshot=service.collect(cfg,force=True)
                 with self.db() as db:
                     db.execute('INSERT OR REPLACE INTO settings(id,value) VALUES (3,?)',(json.dumps(cfg),))
                 with self.lock:
@@ -234,13 +234,14 @@ class Dashboard:
                     if snapshot.get('observed_at'):self.replay_dates=sorted(set(self.replay_dates+[snapshot['observed_at'][:10]]),reverse=True)[:90]
                     partial=not snapshot.get('future') or not snapshot.get('put_wall') or not snapshot.get('call_wall') or snapshot.get('coverage_complete') is False
                     sampling=snapshot.get('sampling') or {}
-                    message=('OI 분할 갱신 · 최근 10분 근방 수신 '+str(sampling['fresh'])+'/'+str(sampling['total'])+'종목' if sampling.get('mode')=='incremental' else 'OI 조회 완료')
+                    message=('OI 전체 새 수신 · 유효 '+str(sampling['fresh'])+'/'+str(sampling['total'])+'종목' if sampling.get('mode')=='full' else 'OI 조회 완료')
                     if partial:message+=' · 일부 수신, 임시 후보'
                     self.oi_job=dict(state='succeeded',message=message+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
                 self.record_confirmation()
         except Exception as exc:
             with self.lock:
                 if not is_rate_limit(exc):self.oi_active=False
+                self.oi_snapshot=None
                 self.last_oi=time.monotonic()
                 self.oi_job=dict(state='failed',message=self.lookup_error(exc))
         finally:
