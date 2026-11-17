@@ -5,12 +5,12 @@ import math
 import sqlite3
 import uuid
 from confirmation import assess,age,numeric
-from instruments import TRADE_SYMBOL
+from instruments import TRADE_SYMBOL, ETF_FEE_BPS
 from trader import KST,TradingError,integer
 
 RULES=dict(touch_pct=.3,put_stop_pct=.3,etf_stop_pct=1,initial_pct=40,below_vwap_pct=20,add_pct=20,
     target1_box_pct=60,target2_box_pct=80,sell_each_pct=30,breakout_failure_pct=.2,cooldown_minutes=15,max_put_stops=2,
-    fee_bps=1.5,slippage_bps=5,tax_bps=0,force_close='15:15',fill_model='신호 확정 후 수집한 ETF REST 현재가 · 불리한 5원 호가/수수료/슬리피지 · 호가 잔량/미체결 미재현')
+    fee_bps=ETF_FEE_BPS,slippage_bps=5,tax_bps=0,force_close='15:15',fill_model='신호 확정 후 수집한 ETF REST 현재가 · 불리한 5원 호가/수수료/슬리피지 · 호가 잔량/미체결 미재현')
 
 
 def fresh(stamp,now,seconds):
@@ -88,7 +88,7 @@ class WallPaper:
         execution=math.ceil(price*1.0005/5)*5
         exposure=quantity(position)*price if position else 0
         budget=min(state['capital']*fraction,state['cash'],max(0,state['capital']-exposure))
-        return math.floor(budget/(execution*1.00015))
+        return math.floor(budget/(execution*(1+RULES['fee_bps']/10000)))
     def step(self,snapshot,oi,quote,now=None,force_exit=False):
         now=now or datetime.now(KST);snapshot=snapshot or {};oi=oi or {};quote=quote or {}
         self.db.execute('BEGIN IMMEDIATE')

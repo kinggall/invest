@@ -15,7 +15,7 @@ import webbrowser
 
 from trader import DemoClient, SharedToken, TradingError, KST, is_rate_limit
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
-from instruments import PREVIOUS_SYMBOL
+from instruments import PREVIOUS_SYMBOL, ETF_FEE_BPS
 from confirmation import assess
 from futures_chart import FuturesChart, session_at
 from wall_paper import WallPaper
@@ -347,7 +347,7 @@ class Dashboard:
                     if command=='backtest':
                         self.progress(job_id,'확정 3분봉으로 백테스트 계산 중…')
                         options=dict(initial=value.get('capital',10000000),
-                            fee_bps=value.get('fee_bps',1.5),slippage_bps=value.get('slippage_bps',5),
+                            fee_bps=value.get('fee_bps',ETF_FEE_BPS),slippage_bps=value.get('slippage_bps',5),
                             tax_bps=value.get('tax_bps',0),allocation=value.get('allocation',100),
                             force_close=value.get('force_close',False),max_buys=cfg['max_daily_buys'],
                             stop_loss_enabled=value.get('stop_loss_enabled',False),stop_loss_pct=value.get('stop_loss_pct',1),stop_halt=value.get('stop_halt',True))

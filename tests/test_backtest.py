@@ -157,7 +157,8 @@ class TrendExitTests(unittest.TestCase):
         for buy,sell in rows:
             index=len(prices);prices.extend([buy-10,buy-10,sell+10,sell+10])
             crosses[index]='buy';crosses[index+2]='sell'
-        result=simulate(self.history(prices,crosses=crosses))
+        # This historical screenshot used the former 1.5bp fee assumption.
+        result=simulate(self.history(prices,crosses=crosses),fee_bps=1.5)
         self.assertEqual(result['net_pnl'],-82298)
         self.assertEqual(result['fees'],21028)
         self.assertEqual(result['slippage_cost'],93500)

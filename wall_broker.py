@@ -128,7 +128,7 @@ class WallBroker(WallPaper):
                         realized=round(cash-fee-cost,2);state['cash']=round(state['cash']+cash-fee,2);state['realized']=round(state['realized']+realized,2)
                     state['fees']=round(state['fees']+fee,2);state['position']=p if quantity(p) else None
                     event=dict(id=row['run_id']+':'+str(filled),time=now.isoformat(),side=meta['side'],quantity=delta,price=price,
-                        reference_price=meta['reference'],fee=fee,realized=realized,reason=meta['reason'],execution='KIS_DEMO_CONFIRMED',order_no=row['order_no'],fee_estimated=True)
+                        reference_price=meta['reference'],fee=fee,realized=realized,reason=meta['reason'],execution='KIS_DEMO_CONFIRMED',order_no=row['order_no'],fee_estimated=True,fee_bps=RULES['fee_bps'])
                     self.db.execute('INSERT INTO wall_paper_events VALUES (?,?,?,?)',(event['id'],state['run_id'],now.isoformat(),json.dumps(event)))
                 meta['applied_quantity']=filled;meta['applied_cash']=amount or 0
                 terminal=status in ('FILLED','CANCELLED')
@@ -224,7 +224,7 @@ class WallBroker(WallPaper):
         if side=='buy':
             power=self.client.buying_power(TRADE_SYMBOL,price)
             fraction=.2 if reason=='BREAKOUT_ADD' or not intent['confirmation']['vwap'].get('above') else .4
-            amount=min(amount,power['quantity'],int(min(state['capital']*fraction,state['cash'],power['cash'])/(price*1.00015)))
+            amount=min(amount,power['quantity'],int(min(state['capital']*fraction,state['cash'],power['cash'])/(price*(1+RULES['fee_bps']/10000))))
             if not amount:raise TradingError('DEMO_BUYING_POWER_INSUFFICIENT')
         elif amount>balance['quantity'] or amount>quantity(state['position']):
             raise TradingError('DEMO_SELL_QUANTITY_BLOCKED')

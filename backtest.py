@@ -4,6 +4,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from trader import TradingError, integer
 from signals import vwap_entry
 from risk import stop_percent
+from instruments import ETF_FEE_BPS
 
 
 STRATEGIES = {
@@ -23,7 +24,7 @@ def rate(value, name, maximum=1000):
     return result
 
 
-def simulate(history, initial=10000000, fee_bps=1.5, slippage_bps=5, tax_bps=0, allocation=100, force_close=False, max_buys=10, vwap_filter=False, exit_policy='macd', benchmark=False, stop_loss_enabled=False, stop_loss_pct=1, stop_halt=True):
+def simulate(history, initial=10000000, fee_bps=ETF_FEE_BPS, slippage_bps=5, tax_bps=0, allocation=100, force_close=False, max_buys=10, vwap_filter=False, exit_policy='macd', benchmark=False, stop_loss_enabled=False, stop_loss_pct=1, stop_halt=True):
     stop_pct=stop_percent(stop_loss_pct)
     if not isinstance(stop_loss_enabled,bool) or not isinstance(stop_halt,bool):raise TradingError('INVALID_STOP_LOSS_SWITCH')
     initial=integer(initial,'CAPITAL');max_buys=integer(max_buys,'MAX_BUYS')

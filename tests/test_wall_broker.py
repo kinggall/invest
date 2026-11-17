@@ -253,3 +253,10 @@ class BrokerTests(unittest.TestCase):
         self.enter();self.fill()
         v=self.book.step({}, {}, {},now=self.start.replace(hour=15,minute=20))
         self.assertEqual(len(self.client.sent),1);self.assertEqual(v['state']['status'],'CLOSE_FAILED')
+
+    def test_confirmed_fill_fee_matches_user_etf_commission(self):
+        self.enter();view=self.fill(price=10020)
+        event=view['events'][0]
+        self.assertEqual(event['fee_bps'],1.46527)
+        self.assertEqual(event['fee'],round(event['quantity']*10020*0.000146527,2))
+        self.assertAlmostEqual(view['state']['cash'],10000000-event['quantity']*10020-event['fee'])
