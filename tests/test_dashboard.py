@@ -194,6 +194,30 @@ class DashboardTests(unittest.TestCase):
             self.app.lookup_thread.join(2)
         self.assertEqual(self.app.lookup_job['state'],'succeeded')
 
+    def test_active_wall_worker_respects_rate_cooldown_before_retrying(self):
+        from datetime import datetime
+        from trader import KST,RateLimitError
+        self.app.wall_enabled=True;clock=[100.0];turn=[0]
+        def wait(seconds):
+            turn[0]+=1
+            if turn[0]>3:return True
+            clock[0]=[100.,110.,131.][turn[0]-1]
+            return False
+        with patch.object(self.app.shutdown,'wait',side_effect=wait),patch.object(d.time,'monotonic',side_effect=lambda:clock[0]),patch.object(d,'datetime') as dates,patch.object(self.app,'tick',side_effect=[RateLimitError(),None]) as tick:
+            dates.now.return_value=datetime(2026,11,16,10,30,tzinfo=KST)
+            self.app.worker()
+        self.assertEqual(tick.call_count,2)
+        self.assertEqual(self.app.retry_after,130)
+        self.assertTrue(self.app.wall_enabled)
+        self.assertIn('EGW00201',self.app.wall_message)
+
+    def test_oi_rate_error_keeps_observer_enabled_for_next_scheduled_attempt(self):
+        self.app.oi_active=True
+        provider=Mock();provider.collect.side_effect=TradingError('API_RATE_LIMIT [EGW00201]')
+        with patch.object(d,'OIService',return_value=provider):self.app.run_oi(self.app.oi_config)
+        self.assertTrue(self.app.oi_active)
+        self.assertIn('30초',self.app.oi_job['message'])
+
     def test_wall_simulator_starts_without_enabling_broker_orders(self):
         self.app.oi_active=True
         with patch.object(d,'SharedToken'),patch.object(self.app,'client'):
@@ -256,7 +280,7 @@ class DashboardTests(unittest.TestCase):
 
     def test_api_version_and_updated_source_are_reported(self):
         status=json.loads(self.request('/api/status')[1])
-        self.assertEqual(status['api_version'],'2026-11-focus1')
+        self.assertEqual(status['api_version'],'2026-11-rate1')
         self.assertFalse(status['restart_required'])
         self.app.enabled=True
         with patch.object(d,'source_fingerprint',return_value='changed-source'):

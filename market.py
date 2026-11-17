@@ -19,9 +19,15 @@ class MarketData:
     def minutes(self, symbol, now):
         day = now.strftime('%Y%m%d')
         cursor = min(now, now.replace(hour=15, minute=30, second=0, microsecond=0))
-        cached = self.db.execute('SELECT max(stamp) FROM minutes WHERE symbol=?', (symbol,)).fetchone()[0]
-        # Initial bootstrapping is bounded to today's session; later polls refresh the last window.
-        maximum = 14 if not cached or (now-datetime.fromisoformat(cached)).total_seconds() > 120 else 1
+        start=now.replace(hour=9,minute=0,second=0,microsecond=0)
+        def saved_times():
+            return [datetime.fromisoformat(row[0]) for row in self.db.execute('SELECT stamp FROM minutes WHERE symbol=? AND stamp>=? AND stamp<=? ORDER BY stamp',(symbol,start.isoformat(),now.isoformat()))]
+        def next_gap(stamps):
+            for left,right in reversed(list(zip(stamps,stamps[1:]))):
+                if right-left>timedelta(minutes=1):return right-timedelta(minutes=1)
+            return stamps[0]-timedelta(minutes=1) if stamps and stamps[0]>start else None
+        saved=saved_times()
+        maximum=1 if saved and next_gap(saved) is None and (now-saved[-1]).total_seconds()<=120 else 4
         seen = set()
         for _ in range(maximum):
             if cursor.hour < 9:
@@ -49,7 +55,8 @@ class MarketData:
                 self.db.execute('INSERT OR REPLACE INTO minutes VALUES (?,?,?)', (symbol,stamp.isoformat(),json.dumps(row)))
             if oldest is None:
                 break
-            cursor = oldest - timedelta(minutes=1)
+            cursor=next_gap(saved_times())
+            if cursor is None:break
         return [json.loads(row[0]) for row in self.db.execute('SELECT value FROM (SELECT stamp,value FROM minutes WHERE symbol=? ORDER BY stamp DESC LIMIT 3000) ORDER BY stamp', (symbol,))]
 
     def daily(self, symbol, cutoff, now=None):

@@ -97,3 +97,44 @@ class DailyTests(unittest.TestCase):
         self.client.symbol='005930'
         with self.assertRaisesRegex(TradingError,'SYMBOL_MISMATCH'):
             self.engine.market.daily(SYMBOL,'2026-11-13',self.now)
+
+class MinuteBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.start=datetime(2026,11,16,9,tzinfo=KST);self.calls=[];self.fail_at=None
+        owner=self
+        class Broker:
+            account=Client.account
+            def request(self,path,tr,params):
+                owner.calls.append(params['FID_INPUT_HOUR_1'])
+                if owner.fail_at==len(owner.calls):raise TradingError('API_RATE_LIMIT [EGW00201]')
+                cursor=datetime.strptime('20261116'+params['FID_INPUT_HOUR_1'],'%Y%m%d%H%M%S').replace(tzinfo=KST)
+                rows=[]
+                for i in range(30):
+                    stamp=cursor-timedelta(minutes=i)
+                    if stamp<owner.start:break
+                    rows.append(dict(stck_bsop_date='20261116',stck_cntg_hour=stamp.strftime('%H%M%S'),stck_oprc='10000',stck_hgpr='10010',stck_lwpr='9990',stck_prpr='10000',cntg_vol='1'))
+                return dict(output2=rows)
+        self.engine=MacdEngine(Path(self.tmp.name)/'state.db',Broker());self.addCleanup(self.engine.db.close)
+    def test_bootstrap_is_bounded_and_resumes_before_cached_earliest_minute(self):
+        now=self.start+timedelta(hours=6)
+        first=self.engine.market.minutes(SYMBOL,now)
+        self.assertEqual(len(self.calls),4)
+        first_oldest=min(r['time'] for r in first)
+        self.calls.clear();second=self.engine.market.minutes(SYMBOL,now)
+        self.assertEqual(len(self.calls),4)
+        self.assertLess(min(r['time'] for r in second),first_oldest)
+        self.assertLess(self.calls[1],datetime.fromisoformat(first_oldest).strftime('%H%M%S'))
+    def test_failure_mid_bootstrap_keeps_partial_cache_and_next_attempt_backfills(self):
+        now=self.start+timedelta(hours=6);self.fail_at=2
+        with self.assertRaises(TradingError):self.engine.market.minutes(SYMBOL,now)
+        first=self.engine.db.execute('SELECT min(stamp) FROM minutes WHERE symbol=?',(SYMBOL,)).fetchone()[0]
+        self.fail_at=None;self.calls.clear()
+        rows=self.engine.market.minutes(SYMBOL,now)
+        self.assertLess(min(r['time'] for r in rows),first)
+        self.assertEqual(len(self.calls),4)
+    def test_complete_after_hours_cache_does_not_repeat_fourteen_pages(self):
+        now=self.start.replace(hour=16)
+        for _ in range(5):self.engine.market.minutes(SYMBOL,now)
+        self.calls.clear();self.engine.market.minutes(SYMBOL,now)
+        self.assertEqual(len(self.calls),1)

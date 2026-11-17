@@ -6,7 +6,7 @@ class Node {constructor(){this.style={};this.children=[];this.attrs={};this.list
 const elements=new Map([...ids].map(id=>[id,new Node()]));
 const fields=elements.get('indicatorForm').elements;for(const match of html.matchAll(/<input\b[^>]*name="([^"]+)"[^>]*>/g)){const field=new Node();field.name=match[1];field.type='number';fields.push(field);fields[field.name]=field}
 const document={getElementById:id=>elements.get(id)||null,createElement:()=>new Node(),createElementNS:()=>new Node()};
-let status={api_version:'2026-11-focus1',restart_required:false,csrf:'test',account_ready:true,token:'준비',enabled:false,risk_active:false,
+let status={api_version:'2026-11-rate1',restart_required:false,csrf:'test',account_ready:true,token:'준비',enabled:false,risk_active:false,
  strategy:{id:'kodex-macd-v1',symbol:'069500',mode:'macd',fast:12,slow:26,signal:9},lookup_job:{state:'idle'},snapshot:null,
  wall_paper:{enabled:false,quantity:0,average_entry:0,equity:10000000,net_pnl:0,message:'가상 시뮬레이션 중지',events:[],state:{run_id:'run',capital:10000000,cash:10000000,realized:0,fees:0,status:'STOPPED',position:null}},
  oi_job:{state:'idle'},oi_config:{expiry:'',radius_pct:5},future_job:{state:'idle'}};
@@ -42,6 +42,7 @@ const context=vm.createContext({document,setInterval:()=>0,console,fetch:async(u
  await vm.runInContext('refresh()',context);assert.match(elements.get('futureTitle').textContent,/야간선물/);assert.match(elements.get('futureWarnings').textContent,/환산선을 숨깁니다/);assert.equal(elements.get('oiFuture').textContent,'800pt / —pt');
  status={...status,wall_paper:{...status.wall_paper,enabled:true,quantity:10,average_entry:79005,events:[{time:'2026-11-17T10:33:10+09:00',side:'buy',reason:'REBOUND_ENTRY',quantity:10,price:79005,reference_price:79000,fee:118.51}],state:{...status.wall_paper.state,updated_at:'2026-11-17T10:33:10+09:00',status:'ENTERED',position:{put:780,call:800,target1:792,target2:796,put_stop:777.66,stop_price:78214.95,breakout_count:0,added:false}}}};
  await vm.runInContext('refresh()',context);assert.equal(elements.get('wallTrades').children.length,1);assert.match(elements.get('wallBox').textContent,/792/);assert.ok(elements.get('wallCandles').children.some(n=>n.attrs.points));
+ status={...status,wall_paper:{...status.wall_paper,retry_after_seconds:25}};await vm.runInContext('refresh()',context);assert.match(elements.get('wallRunning').textContent,/호출 한도 대기 · 25초/);assert.match(elements.get('running').textContent,/호출 한도 대기/);
  status={...status,restart_required:true};await vm.runInContext('refresh()',context);assert.equal(elements.get('wallStart').disabled,true);assert.equal(elements.get('preview').disabled,true);const before=requests.length;await vm.runInContext("action('wall_start')",context);assert.equal(requests.length,before);
  assert.ok(requests.every(r=>r.url!='/api/start'));
  console.log('Dedicated paper page: legacy controls absent, indicator settings, OI, futures, flow, ledger and chart markers, loading/retry and version guard passed.');

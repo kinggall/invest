@@ -56,6 +56,59 @@ def safe_code(data):
     return ''
 
 
+class RateLimitError(TradingError):
+    def __init__(self,seconds=30):
+        self.retry_after=max(1,math.ceil(seconds))
+        super().__init__('API_RATE_LIMIT [EGW00201] · '+str(self.retry_after)+'초 후 재시도')
+
+
+def is_rate_limit(error):
+    return isinstance(error,RateLimitError) or 'EGW00201' in str(error)
+
+
+class APIGate:
+    """Per-host/app-key actual dispatch spacing, shared across client instances."""
+    def __init__(self,clock=None,sleep=None):
+        self.clock=clock or (lambda:time.monotonic());self.sleep=sleep or (lambda seconds:time.sleep(seconds))
+        self.lock=threading.Lock();self.buckets={}
+    def bucket(self,base,key):
+        identity=hashlib.sha256((base+'\0'+key).encode()).hexdigest()
+        with self.lock:
+            return self.buckets.setdefault(identity,dict(lock=threading.Lock(),next=0.0,cooldown=0.0))
+    def wait(self,base,key,interval):
+        bucket=self.bucket(base,key)
+        with bucket['lock']:
+            now=self.clock()
+            if bucket['cooldown']>now:raise RateLimitError(bucket['cooldown']-now)
+            while bucket['next']>now:
+                self.sleep(bucket['next']-now);now=self.clock()
+            # A late wake must not bunch requests reserved for earlier slots.
+            bucket['next']=now+max(1.1,interval) if interval>0 else now
+    def penalize(self,base,key,seconds=30):
+        bucket=self.bucket(base,key)
+        with bucket['lock']:bucket['cooldown']=max(bucket['cooldown'],self.clock()+seconds)
+
+
+_api_gate=APIGate()
+
+
+def read_only_get(client,base,path,tr_id,payload):
+    key,secret,token=client.tokens.read()
+    headers={'Content-Type':'application/json; charset=utf-8','authorization':'Bearer '+token,
+        'appkey':key,'appsecret':secret,'tr_id':tr_id,'custtype':'P'}
+    _api_gate.wait(base,key,client.interval)
+    try:
+        data=client.send(path,headers,payload,False) if client.send else transport(path,headers,payload,False,base=base)
+    except RequestFailure as exc:
+        if exc.code=='EGW00201':
+            _api_gate.penalize(base,key);raise RateLimitError() from None
+        raise
+    finally:client.last=time.monotonic()
+    if safe_code(data)=='EGW00201':
+        _api_gate.penalize(base,key);raise RateLimitError()
+    return data
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -147,13 +200,7 @@ class ReadOnlyHistoryClient:
     def request(self,path,tr_id,payload,post=False):
         if path!=HISTORY_PATH or tr_id!='FHKST03010230' or post:
             raise TradingError('READ_ONLY_HISTORY_ROUTE_BLOCKED')
-        key,secret,token=self.tokens.read()
-        headers={'Content-Type':'application/json; charset=utf-8','authorization':'Bearer '+token,
-            'appkey':key,'appsecret':secret,'tr_id':tr_id,'custtype':'P'}
-        time.sleep(max(0,self.interval-(time.monotonic()-self.last)))
-        try:
-            data=(self.send(path,headers,payload,False) if self.send else transport(path,headers,payload,False,base=REAL_BASE))
-        finally:self.last=time.monotonic()
+        data=read_only_get(self,REAL_BASE,path,tr_id,payload)
         if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':
             raise TradingError('HISTORY_QUERY_REJECTED / CODE='+safe_code(data))
         return data
@@ -166,33 +213,13 @@ class ReadOnlyDerivativesClient:
 
     def request(self,path,tr_id,payload,post=False):
         if DERIVATIVE_READS.get(path)!=tr_id or post:raise TradingError('DERIVATIVES_READ_ONLY_ROUTE_BLOCKED')
-        key,secret,token=self.tokens.read()
-        headers={'Content-Type':'application/json; charset=utf-8','authorization':'Bearer '+token,
-            'appkey':key,'appsecret':secret,'tr_id':tr_id,'custtype':'P'}
-        time.sleep(max(0,self.interval-(time.monotonic()-self.last)))
-        try:
-            data=self.send(path,headers,payload,False) if self.send else transport(path,headers,payload,False,base=REAL_BASE)
-        finally:self.last=time.monotonic()
+        data=read_only_get(self,REAL_BASE,path,tr_id,payload)
         if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':raise TradingError('OI_QUOTE_REJECTED / CODE='+safe_code(data))
         return data
 
 
-_demo_slot_lock=threading.Lock()
-_demo_next_slot=0.0
-
-
-def demo_slot(interval):
-    global _demo_next_slot
-    with _demo_slot_lock:
-        now=time.monotonic()
-        reserved=max(now,_demo_next_slot)
-        _demo_next_slot=reserved+interval
-    # Release the scheduler before I/O so slow data calls cannot lock out risk calls.
-    time.sleep(max(0,reserved-now))
-
-
 class DemoClient:
-    def __init__(self, home, cano, product, send=transport, interval=0.6):
+    def __init__(self, home, cano, product, send=transport, interval=1.1):
         if not re.fullmatch(r'\d{8}', cano) or not re.fullmatch(r'\d{2}', product):
             raise TradingError('INVALID_DEMO_ACCOUNT')
         self.tokens = SharedToken(home)
@@ -210,10 +237,13 @@ class DemoClient:
                    'appkey': key, 'appsecret': secret, 'tr_id': tr_id, 'custtype': 'P'}
         if continuation:
             headers['tr_cont'] = 'N'
-        if self.interval>0:demo_slot(self.interval)
+        _api_gate.wait(BASE,key,self.interval)
         try:
             data = self.send(path, headers, payload, post)
         except RequestFailure as exc:
+            if exc.code=='EGW00201':
+                _api_gate.penalize(BASE,key)
+                if not post:raise RateLimitError() from None
             prefix = 'REQUEST_UNCERTAIN' if post else 'QUERY_FAILED'
             raise TradingError(prefix + ' / ' + str(exc)) from None
         except Exception:
@@ -224,6 +254,9 @@ class DemoClient:
             # Even a negative response is not automatically safe to resubmit.
             prefix = 'ORDER_REQUIRES_RECONCILIATION' if post else 'KIS_QUERY_REJECTED'
             code = safe_code(data)
+            if code=='EGW00201':
+                _api_gate.penalize(BASE,key)
+                if not post:raise RateLimitError()
             raise TradingError(prefix + (' / CODE=' + code if code else ''))
         return data
 

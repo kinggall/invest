@@ -13,7 +13,7 @@ import threading
 import time
 import webbrowser
 
-from trader import DemoClient, SharedToken, TradingError, KST
+from trader import DemoClient, SharedToken, TradingError, KST, is_rate_limit
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from instruments import PREVIOUS_SYMBOL
 from confirmation import assess
@@ -25,7 +25,7 @@ from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
 
-API_VERSION = '2026-11-focus1'
+API_VERSION = '2026-11-rate1'
 
 
 def source_fingerprint():
@@ -68,6 +68,7 @@ class Dashboard:
         self.lookup_job = dict(state='idle',command=None,message='조회할 거래일을 선택하세요.')
         self.lookup_thread = None
         self.last_refresh = 0
+        self.retry_after=0
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT)')
@@ -117,7 +118,7 @@ class Dashboard:
 
     def wall_status(self):
         paper=WallPaper(self.state)
-        try:return dict(paper.view(),enabled=self.wall_enabled,exit_requested=self.wall_exit_requested,message=self.wall_message)
+        try:return dict(paper.view(),enabled=self.wall_enabled,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=self.wall_message)
         finally:paper.close()
 
     def wall_tick(self,snapshot,client):
@@ -217,7 +218,8 @@ class Dashboard:
                 self.record_confirmation()
         except Exception as exc:
             with self.lock:
-                self.oi_active=False;self.last_oi=time.monotonic()
+                if not is_rate_limit(exc):self.oi_active=False
+                self.last_oi=time.monotonic()
                 self.oi_job=dict(state='failed',message=self.lookup_error(exc))
         finally:
             if service is not None:service.close()
@@ -279,6 +281,8 @@ class Dashboard:
     def lookup_error(exc):
         if isinstance(exc,TradingError):
             code=str(exc)
+            if is_rate_limit(exc):
+                return '한투 API 호출 한도 초과 [EGW00201] · 최소 30초 대기 후 자동 재시도합니다. 가상 체결은 보류합니다.'
             if code.startswith('SHARED_REAL_TOKEN_UNAVAILABLE'):
                 return ('기존 domino의 실전 조회 토큰이 없거나 만료됐거나 키가 일치하지 않습니다. '
                         '동일한 DOMINO_HOME에서 기존 domino_kis.py check --environment real로 연결을 확인하세요. '
@@ -412,7 +416,7 @@ class Dashboard:
             with self.lock:
                 execute=self.enabled
                 wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
-                due=execute or wall_due or time.monotonic()-self.last_refresh>=60
+                due=(execute or wall_due or time.monotonic()-self.last_refresh>=60) and time.monotonic()>=self.retry_after
                 lookup_running=self.lookup_job['state']=='running'
             if not due or lookup_running or not self.io_lock.acquire(blocking=False):
                 continue
@@ -421,6 +425,7 @@ class Dashboard:
             except Exception as exc:
                 with self.lock:
                     self.last_refresh=time.monotonic()
+                    if is_rate_limit(exc):self.retry_after=time.monotonic()+30
                     self.enabled=False
                     self.last_message=self.lookup_error(exc)+' · 자동 실행 중지'
                     if self.wall_enabled or self.wall_exit_requested:self.wall_message=self.lookup_error(exc)+' · 가상 체결 보류, 다음 조회 재시도'
