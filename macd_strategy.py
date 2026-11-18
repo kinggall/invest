@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp, order_window, session_info
 """One ETF, closed-bar MACD crosses, fill-based positions, per-signal deduplication."""
 from datetime import datetime, timedelta
 import json
@@ -92,7 +93,7 @@ class MacdEngine(Engine):
             snapshot['event_id']=event_id
             snapshot['status']='BUY_SIGNAL' if side=='buy' else 'SELL_SIGNAL'
         # Only regular continuous KRX trading. Holidays require fresh bars below.
-        if now.weekday()>=5 or not ((9,0) <= (now.hour,now.minute) < (15,20)):
+        if now.weekday()>=5 or not (market_time(now,9,0) <= (now.hour,now.minute) < market_time(now,15,20)):
             snapshot['status']='MARKET_CLOSED'
             return snapshot
         if stamp.date()!=now.date() or not 0 <= (now-stamp).total_seconds() <= 90:

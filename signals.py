@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp
 """Closed KRX 3-minute bars and SMA-seeded MACD; no execution side effects."""
 from datetime import datetime, timedelta
 import math
@@ -8,7 +9,7 @@ def aggregate(minutes, now):
     buckets = {}
     for row in minutes:
         stamp = datetime.fromisoformat(row['time']).astimezone(KST)
-        if stamp.second or stamp.hour < 9 or stamp.hour > 15 or (stamp.hour == 15 and stamp.minute >= 30):
+        if stamp.second or not (market_time(stamp,9) <= (stamp.hour,stamp.minute) < market_time(stamp,15,30)):
             continue
         start = stamp.replace(minute=stamp.minute - stamp.minute % 3, second=0, microsecond=0)
         if start + timedelta(minutes=3) > now:
@@ -69,7 +70,7 @@ def session_vwap(minutes, bars):
     unique = {}
     for row in minutes:
         stamp = datetime.fromisoformat(row['time']).astimezone(KST)
-        if stamp.second or not ((9,0) <= (stamp.hour,stamp.minute) < (15,30)):
+        if stamp.second or not (market_time(stamp,9,0) <= (stamp.hour,stamp.minute) < market_time(stamp,15,30)):
             continue
         if stamp in unique and any(unique[stamp][k] != row[k] for k in ('high','low','close','volume')):
             raise TradingError('VWAP_MINUTE_CONFLICT')
@@ -86,7 +87,7 @@ def session_vwap(minutes, bars):
             day = stamp.date()
             total_value = total_volume = 0.0
             complete = True
-            expected = stamp.replace(hour=9,minute=0,second=0,microsecond=0)
+            expected = market_stamp(stamp,9)
         if stamp != expected:
             complete = False
             count=max(0,int((stamp-expected).total_seconds()//60))
@@ -121,7 +122,7 @@ def session_vwap(minutes, bars):
             vwap_missing_minutes=state.get('missing',0),vwap_missing_times=state.get('missing_times',[]),
             vwap_cumulative_volume=state.get('volume',0),
             vwap_distance_pct=(bar['close']/value-1)*100 if value else None,
-            vwap_source='당일 1분봉 HLC3×거래량 근사 · 09:00 초기화'))
+            vwap_source='당일 1분봉 HLC3×거래량 근사 · 개장 시각 초기화'))
         previous,previous_day = value,end.date()
     return result
 

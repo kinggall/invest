@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp, order_window, session_info
 """Loopback-only demo trading dashboard. Credentials never reach the browser."""
 import argparse
 import hashlib
@@ -36,7 +37,7 @@ API_VERSION = '2026-11-demo2'
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py','price_archive.py','monitoring.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py','price_archive.py','monitoring.py','market_session.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -161,10 +162,10 @@ class Dashboard:
         paper=WallBroker(self.state)
         try:
             result=paper.view();now=datetime.now(KST);message=self.wall_message
-            open_window=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
-            if (self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,19) and (result['quantity'] or result['pending_count']):
-                result['state']['status']='CLOSE_DELAYED' if (now.hour,now.minute)<(15,20) else 'CLOSE_FAILED'
-                message='15:19 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 확인하세요 / '+self.wall_message
+            open_window=now.weekday()<5 and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20)
+            if (self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=market_time(now,15,19) and (result['quantity'] or result['pending_count']):
+                result['state']['status']='CLOSE_DELAYED' if (now.hour,now.minute)<market_time(now,15,20) else 'CLOSE_FAILED'
+                message=session_info(now)['deadline']+' 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 확인하세요 / '+self.wall_message
             if source_fingerprint()!=self.source_fingerprint:
                 message+=' / 서버 코드가 갱신됐습니다. Ctrl+C로 종료 후 재시작해야 합니다.'
             health=dict(self.protection_health)
@@ -178,7 +179,7 @@ class Dashboard:
 
     def wall_tick(self,snapshot,client):
         clock=datetime.now(KST)
-        if clock.weekday()<5 and (clock.hour,clock.minute)>=(15,15):return
+        if clock.weekday()<5 and (clock.hour,clock.minute)>=market_time(clock,15,15):return
         if source_fingerprint()!=self.source_fingerprint:
             self.record_watch('STRATEGY_BLOCKED',reason='SOURCE_CHANGED')
             with self.lock:
@@ -188,7 +189,7 @@ class Dashboard:
         if not active and not exit_requested:return
         quote={}
         now=datetime.now(KST)
-        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):
+        if now.weekday()<5 and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20):
             price=client.quote(SYMBOL)
             quote=dict(price=price,observed_at=datetime.now(KST).isoformat())
         paper=WallBroker(self.state,client)
@@ -223,7 +224,7 @@ class Dashboard:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
             orders=[];signals=[] # Historical broker ledger is retained, not part of this page.
-            return dict(recording=watch_status(self.state),recording_error=self.watch_error,price_archive=archive_latest(self.state),replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(market_session=session_info(datetime.now(KST)),recording=watch_status(self.state),recording_error=self.watch_error,price_archive=archive_latest(self.state),replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -364,7 +365,7 @@ class Dashboard:
     def oi_worker(self):
         while not self.shutdown.wait(1):
             now=datetime.now(KST)
-            session=now.weekday()<5 and (8,45)<=(now.hour,now.minute)<(15,45)
+            session=now.weekday()<5 and market_time(now,8,45)<=(now.hour,now.minute)<market_time(now,15,45)
             with self.lock:
                 if self.oi_active and session and self.oi_job['state']!='running' and time.monotonic()-self.last_oi>=60:
                     self.request_oi(self.oi_config,True)
@@ -496,8 +497,8 @@ class Dashboard:
                 self.wall_message='전략 예산 설정됨 · 모의계좌 입금/초기화가 아닌 전략 한도입니다'
             elif command=='wall_close':
                 now=datetime.now(KST)
-                if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,20):
-                    raise TradingError('지금은 모의주문 실행시간(평일 09:00~15:20)이 아닙니다. 주문·잔고 다시 조회로 상태를 확인하세요.')
+                if now.weekday()>=5 or not market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20):
+                    raise TradingError('지금은 모의주문 실행시간('+session_info(now)['open']+'~'+session_info(now)['order_cutoff']+')이 아닙니다. 주문·잔고 다시 조회로 상태를 확인하세요.')
                 if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문을 먼저 중지하세요.')
                 self.wall_exit_requested=True;self.last_refresh=0
                 self.wall_message='모의 전량청산 요청 · 미체결 확인 후 다음 유효 장중 시세에 주문'
@@ -559,8 +560,8 @@ class Dashboard:
 
     def demo_submission_allowed(self):
         now=datetime.now(KST)
-        return ((self.wall_enabled or self.wall_exit_requested or (self.day_exit_armed and (now.hour,now.minute)>=(15,15))) and now.weekday()<5
-                and (9,0)<=(now.hour,now.minute)<(15,20)
+        return ((self.wall_enabled or self.wall_exit_requested or (self.day_exit_armed and (now.hour,now.minute)>=market_time(now,15,15))) and now.weekday()<5
+                and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20)
                 and source_fingerprint()==self.source_fingerprint)
 
     def sync_demo(self):
@@ -568,7 +569,7 @@ class Dashboard:
         try:pending=bool(broker.pending())
         finally:broker.close()
         now=datetime.now(KST)
-        closing=(self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,15)
+        closing=(self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=market_time(now,15,15)
         if not pending and not closing:return
         broker=WallBroker(self.state,self.client())
         try:
@@ -585,7 +586,7 @@ class Dashboard:
     def exit_submission_allowed(self):
         now=datetime.now(KST)
         return ((self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5
-                and (9,0)<=(now.hour,now.minute)<(15,20))
+                and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20))
 
     def protection_tick(self):
         now=datetime.now(KST)
@@ -593,10 +594,10 @@ class Dashboard:
             self.sync_demo() # Existing orders can still be polled read-only.
             return
         with self.lock:self.protection_health.update(last_attempt=now.isoformat())
-        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):self.record_watch('PROTECTION_STARTED',manual=self.wall_exit_requested)
-        if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,15):
+        if now.weekday()<5 and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20):self.record_watch('PROTECTION_STARTED',manual=self.wall_exit_requested)
+        if now.weekday()>=5 or not market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,15):
             self.sync_demo()
-            with self.lock:self.protection_health.update(state='CLOSING' if (15,15)<=(now.hour,now.minute)<(15,20) else 'CLOSED',error=None)
+            with self.lock:self.protection_health.update(state='CLOSING' if market_time(now,15,15)<=(now.hour,now.minute)<market_time(now,15,20) else 'CLOSED',error=None)
             return
         local=WallBroker(self.state)
         try:view=local.view()
@@ -660,7 +661,7 @@ class Dashboard:
         while not self.shutdown.wait(10):
             with self.lock:
                 execute=self.enabled
-                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
+                wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and order_window(datetime.now(KST))
                 due=(execute or wall_due or time.monotonic()-self.last_refresh>=60) and time.monotonic()>=self.retry_after
                 lookup_running=self.lookup_job['state']=='running'
             if not due or lookup_running or not self.io_lock.acquire(blocking=False):

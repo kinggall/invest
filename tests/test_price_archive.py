@@ -60,5 +60,5 @@ class ArchiveTests(unittest.TestCase):
         root=Path(__file__).resolve().parents[1]
         self.assertIn('schedule-price-archive.ps1',(root/'start-dashboard.ps1').read_text())
         script=(root/'schedule-price-archive.ps1').read_text()
-        for text in ('$slot -lt 26','15:35','15:50','16:10','-StartWhenAvailable','-AtLogOn','-MultipleInstances IgnoreNew','--domino-home','--state'):
+        for text in ('$slot -lt 30','15:35','15:50','16:10','-StartWhenAvailable','-AtLogOn','-MultipleInstances IgnoreNew','--domino-home','--state'):
             self.assertIn(text,script)

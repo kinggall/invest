@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp, order_window, session_info
 """OI strategy execution on KIS DEMO only. Local paper history is never imported."""
 from copy import deepcopy
 from datetime import datetime, timedelta
@@ -167,7 +168,7 @@ class WallBroker(WallPaper):
                 self.db.execute('COMMIT')
             except Exception:self.db.execute('ROLLBACK');raise
             # A durable cancellation intent prevents duplicate POSTs after a crash.
-            closing=(now.hour,now.minute)>=(15,15)
+            closing=(now.hour,now.minute)>=market_time(now,15,15)
             strategy=json.loads(row['strategy'])
             full_market_exit=(strategy['side']=='sell' and strategy.get('order_type')=='market'
                               and row['quantity']-filled==quantity(self.load()['position']))
@@ -224,10 +225,10 @@ class WallBroker(WallPaper):
         quote=quote or {};index=index or {}
         position=self.load()['position']
         reason=self.protection_reason(position,quote,index,now) if protect_only else None
-        self.trace('EVALUATION_STARTED',now,quantity=quantity(position),force_exit=bool(force_exit),closing=(now.hour,now.minute)>=(15,15),protect_only=protect_only,price=quote.get('price'),quote_at=quote.get('observed_at'),spot=index.get('price'),index_at=index.get('observed_at'))
-        self.sync(now,urgent_exit=bool(force_exit or reason in ('ETF_STOP','PROFIT_PROTECT','PUT_STOP','OVERNIGHT_EXIT')),allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
-        regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
-        closing=now.weekday()<5 and (now.hour,now.minute)>=(15,15)
+        self.trace('EVALUATION_STARTED',now,quantity=quantity(position),force_exit=bool(force_exit),closing=(now.hour,now.minute)>=market_time(now,15,15),protect_only=protect_only,price=quote.get('price'),quote_at=quote.get('observed_at'),spot=index.get('price'),index_at=index.get('observed_at'))
+        self.sync(now,urgent_exit=bool(force_exit or reason in ('ETF_STOP','PROFIT_PROTECT','PUT_STOP','OVERNIGHT_EXIT')),allow_cancel=(now.weekday()<5 and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20) and (may_submit is None or may_submit())))
+        regular=now.weekday()<5 and market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20)
+        closing=now.weekday()<5 and (now.hour,now.minute)>=market_time(now,15,15)
         pending=self.pending()
         if closing and not regular:
             state=self.load();unresolved=bool(quantity(state['position']) or pending)
@@ -236,9 +237,9 @@ class WallBroker(WallPaper):
             self.save(state);self.trace('BLOCKED',now,status=state['status'],message=state['message']);return self.view()
         if pending:
             blocked=closing and any(not row['order_no'] for row in pending)
-            late=closing and (now.hour,now.minute)>=(15,19)
+            late=closing and (now.hour,now.minute)>=market_time(now,15,19)
             state=self.load();state.update(status='CLOSE_BLOCKED' if blocked else 'CLOSE_DELAYED' if late else 'ORDER_PENDING',
-                message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else '15:19 청산 기한 초과 · 미체결 즉시 확인 · 잔여 청산 진행' if late else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
+                message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else session_info(now)['deadline']+' 청산 기한 초과 · 미체결 즉시 확인 · 잔여 청산 진행' if late else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
             self.trace('BLOCKED',now,status=state['status'],message=state['message'])
             return self.view()
         self.db.execute('BEGIN IMMEDIATE')
@@ -254,6 +255,8 @@ class WallBroker(WallPaper):
                         raise Intent(state,position,'DAY_EXIT' if closing else 'MANUAL_EXIT','sell',amount,reference,None,now,{})
                     state.update(armed=None,status='CLOSED_FLAT' if closing else 'FLAT',
                         message='당일 청산 확인 완료 · 보유 0 / 미체결 0' if closing else '보유 없음',updated_at=now.isoformat())
+                elif protect_only and not regular:
+                    state.update(status='CLOSED',message='정규장 시작 전 · 보유 감시 주문 대기')
                 elif protect_only:
                     position=state['position'];amount=quantity(position)
                     if not amount:state.update(status='FLAT',message='확인된 보유 없음 · 신규 진입은 전략에서만 판단')

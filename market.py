@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp
 """Demo-only minute history and explicitly timestamped market-wide KOSPI flow."""
 from datetime import datetime, timedelta
 import json
@@ -19,7 +20,7 @@ class MarketData:
     def minutes(self, symbol, now):
         day = now.strftime('%Y%m%d')
         cursor = min(now, now.replace(hour=15, minute=30, second=0, microsecond=0))
-        start=now.replace(hour=9,minute=0,second=0,microsecond=0)
+        start=market_stamp(now,9)
         def saved_times():
             return [datetime.fromisoformat(row[0]) for row in self.db.execute('SELECT stamp FROM minutes WHERE symbol=? AND stamp>=? AND stamp<=? ORDER BY stamp',(symbol,start.isoformat(),now.isoformat()))]
         def next_gap(stamps):
@@ -66,7 +67,7 @@ class MarketData:
         except (ValueError,TypeError):
             raise TradingError('기준일을 YYYY-MM-DD 형식으로 선택하세요.') from None
         if end>now.date():raise TradingError('미래 날짜는 조회할 수 없습니다.')
-        if end==now.date() and (now.hour,now.minute)<(15,30):
+        if end==now.date() and (now.hour,now.minute)<market_time(now,15,30):
             end-=timedelta(days=1)  # Complete daily candles only.
         start=end-timedelta(days=365)
         data=self.client.request(DAILY,'FHKST03010100',dict(FID_COND_MRKT_DIV_CODE='J',

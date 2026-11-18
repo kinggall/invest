@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp
 """Read-only day/night KOSPI200 futures OHLCV. No synthetic ticks or orders."""
 from datetime import datetime,timedelta
 import json
@@ -13,7 +14,7 @@ def session_at(now):
     for offset in range(8):
         day=(now-timedelta(days=offset)).replace(hour=0,minute=0,second=0,microsecond=0)
         if day.weekday()>=5:continue
-        for mode,market,start,end in [('day','F',day.replace(hour=8,minute=45),day.replace(hour=15,minute=45)),
+        for mode,market,start,end in [('day','F',market_stamp(day,8,45),market_stamp(day,15,45)),
                                      ('night','CM',day.replace(hour=18),day+timedelta(days=1,hours=6))]:
             if start<=now:windows.append(dict(id=mode+':'+day.date().isoformat(),mode=mode,market=market,start=start.isoformat(),end=end.isoformat(),scheduled_open=now<end))
     return max(windows,key=lambda r:r['start'])

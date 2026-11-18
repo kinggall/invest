@@ -1,3 +1,4 @@
+from market_session import market_time
 """Observed monthly KOSPI200 option OI concentrations; never execution signals."""
 from datetime import datetime,timedelta
 import json
@@ -399,7 +400,7 @@ class OIService:
         if not incremental and (len(calls)>=100 or len(puts)>=100):warnings.append('API는 각 측 최대 100건입니다. 수신 범위 안의 후보이며 전체 행사가를 보장하지 않습니다.')
         if skip_call+skip_put:warnings.append('행사가/OI 필드가 없는 '+str(skip_call+skip_put)+'개 행을 제외했습니다.')
         if not put_candidates or not call_candidates:warnings.append('현재 지수 근처의 유의미한 1차 OI 봉우리가 양쪽 모두 확인되지는 않았습니다. 먼 주요 벽으로 자동 대체하지 않습니다.')
-        if observed.weekday()>=5 or not ((8,45)<=(observed.hour,observed.minute)<(15,45)):
+        if observed.weekday()>=5 or not (market_time(observed,8,45)<=(observed.hour,observed.minute)<market_time(observed,15,45)):
             warnings.append('정규장 외 조회입니다. 직전 장 자료일 수 있으며 원자료 갱신시각은 확인되지 않았습니다.')
         if (observed-now).total_seconds()>30:warnings.append('조회에 30초 이상 걸렸습니다. 지수·선물·OI는 동시 체결 시각 자료가 아니며 환산선은 참고값입니다.')
         snapshot=dict(collection_started_at=now.isoformat(),collection_seconds=(observed-now).total_seconds(),expiry=expiry,expiries=expiries,radius_pct=cfg['radius_pct'],observed_at=observed.isoformat(),source_time=None,

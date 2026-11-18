@@ -1,3 +1,4 @@
+from market_session import market_stamp
 """Read-only trading audit; optional existing-token market GET, never orders or ledger repairs."""
 import argparse
 from collections import Counter
@@ -72,15 +73,15 @@ def audit(database,day):
         stop_price=p.get('stop_price') if p else None,put_stop=p.get('put_stop') if p else None,target1=p.get('target1') if p else None,target2=p.get('target2') if p else None)
     sells=[r for r in report['orders'] if r['side']=='sell']
     proven=[t for t in report['trace'] if t['kind']=='SIGNAL' and t['details'].get('side')=='sell']
-    evaluated=[t for t in report['trace'] if t['kind']=='EVALUATION_STARTED' and '09:00'<=t['at'][11:16]<'15:20']
+    evaluated=[t for t in report['trace'] if t['kind']=='EVALUATION_STARTED' and market_stamp(parsed,9).strftime('%H:%M')<=t['at'][11:16]<market_stamp(parsed,15,20).strftime('%H:%M')]
     report['trace_coverage']=dict(count=len(evaluated),first=evaluated[0]['at'] if evaluated else None,last=evaluated[-1]['at'] if evaluated else None)
     report['evidence']=dict(sell_order_count=len(sells),proven_sell_signal_count=len(proven),trace_available=bool(evaluated),
         conclusion='매도 주문 기록 있음 · 접수/체결 상태를 확인해야 합니다.' if sells else
                    '매도 판단 기록은 있으나 주문 기록 없음 · 전송 전 차단/오류 확인 필요' if proven else
                    '매도 주문 기록 없음 · 기존 판단 로그가 없어 매도 신호 유무는 확정 불가' if not evaluated else
                    '저장된 판단 로그에 매도 신호 없음 · 기록된 시간 구간에 한한 결과')
-    report['scheduled_close']=dict(required_if_holding=True,starts_at=day+'T15:15:00+09:00',target=day+'T15:19:00+09:00',
-        registered_close_orders=sum(r['reason']=='DAY_EXIT' for r in sells),note='보유 중이면 별도 익절/손절 신호가 없어도 15:15 청산 조건이 존재합니다.')
+    report['scheduled_close']=dict(required_if_holding=True,starts_at=market_stamp(parsed,15,15).isoformat(),target=market_stamp(parsed,15,19).isoformat(),
+        registered_close_orders=sum(r['reason']=='DAY_EXIT' for r in sells),note='보유 중이면 별도 익절/손절 신호가 없어도 '+market_stamp(parsed,15,15).strftime('%H:%M')+' 청산 조건이 존재합니다.')
     # Restrict retrospective reconstruction to the exact simple case we can prove:
     # one confirmed entry fill, still open, without any later fill changing its basis.
     related=[r for r in order_rows if p and json.loads(r['meta'])['position']['id']==p['id']]

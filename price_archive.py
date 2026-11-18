@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp
 """Automatically archive actual ETF minutes before API retention expires. GET only."""
 import argparse
 from contextlib import contextmanager
@@ -13,8 +14,8 @@ from trader import KST, ReadOnlyHistoryClient, TradingError
 
 
 def expected_minutes(date,now):
-    start=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
-    end=min(start.replace(hour=15,minute=19),now.replace(second=0,microsecond=0)-timedelta(minutes=1))
+    start=market_stamp(date,9)
+    end=min(market_stamp(date,15,19),now.replace(second=0,microsecond=0)-timedelta(minutes=1))
     return [(start+timedelta(minutes=i)).isoformat() for i in range(max(0,int((end-start).total_seconds()/60)+1))]
 
 
@@ -59,20 +60,20 @@ def archive(database,home,now=None,client=None,force=False):
             prepare(db);reader=None
             dates=[];date=now.date()
             for _ in range(7):
-                if date.weekday()<5 and (date<now.date() or (now.hour,now.minute)>=(9,2)):dates.append(date)
+                if date.weekday()<5 and (date<now.date() or (now.hour,now.minute)>=market_time(now,9,2)):dates.append(date)
                 if len(dates)>=3:break
                 date-=timedelta(days=1)
             for date in dates:
                 wanted=expected_minutes(date,now)
                 stamps={r[0] for r in db.execute('SELECT stamp FROM minutes WHERE symbol=? AND substr(stamp,1,10)=?',(TRADE_SYMBOL,date.isoformat()))}
                 missing=sorted(set(wanted)-stamps)
-                closed=date<now.date() or (now.hour,now.minute)>=(15,31)
+                closed=date<now.date() or (now.hour,now.minute)>=market_time(now,15,31)
                 previous=db.execute('SELECT checked_at,payload FROM price_archive_runs WHERE day=?',(date.isoformat(),)).fetchone()
                 # Current data catch-up every 15min, old failed days hourly.
                 # A partial 15:15 run must not defer the first post-close sweep.
                 delay=timedelta(minutes=15 if date==now.date() else 60)
                 previous_at=datetime.fromisoformat(previous[0]) if previous else None
-                postclose=bool(previous_at and closed and date==now.date() and (previous_at.hour,previous_at.minute)<(15,31))
+                postclose=bool(previous_at and closed and date==now.date() and (previous_at.hour,previous_at.minute)<market_time(now,15,31))
                 if previous and not force and not postclose and now-datetime.fromisoformat(previous[0])<delay:continue
                 record=dict(day=date.isoformat(),checked_at=now.isoformat(),expected=len(wanted),status='COMPLETE' if closed and not missing else 'COLLECTING',source='KIS real ETF minute GET',error=None)
                 finalized=bool(previous and json.loads(previous[1]).get('finalized'))

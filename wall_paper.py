@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp, order_window, session_info
 """Causal local paper ledger for OI rebound/scale-out/breakout. No broker client."""
 from datetime import datetime,timedelta
 import json
@@ -117,7 +118,7 @@ class WallPaper:
         def wait(status,message):s.update(status=status,message=message,updated_at=now.isoformat());return s
         day=now.date().isoformat();p=s['position'];q=quantity(p)
         if s['day']!=day:s.update(day=day,armed=None,used_touch=None,losses={})
-        if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,20):
+        if now.weekday()>=5 or not market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20):
             return wait('CLOSED','장외 · 가상 보유 유지, 유효한 장중 시세까지 대기')
         live=(etf.get('symbol')==TRADE_SYMBOL and fresh(etf.get('price_time'),now,120) and numeric(quote.get('price')) and quote['price']>0
             and fresh(quote.get('observed_at'),now,20))
@@ -130,7 +131,7 @@ class WallPaper:
             reason=None
             if force_exit:reason='MANUAL_EXIT'
             elif p['entry_day']!=day:reason='OVERNIGHT_EXIT'
-            elif (now.hour,now.minute)>=(15,15):reason='DAY_EXIT'
+            elif (now.hour,now.minute)>=market_time(now,15,15):reason='DAY_EXIT'
             elif price<=p['stop_price']:reason='PROFIT_PROTECT' if p['protected'] and price>=average(p)*.99 else 'ETF_STOP'
             elif spot is not None and spot<=p['put_stop']:reason='PUT_STOP'
             if reason:
@@ -173,7 +174,7 @@ class WallPaper:
                     return wait('ADDED','콜월 돌파 2회와 보조조건 확인 · 가상 추가매수 20% 한도')
             return wait('HOLDING','가상 보유 · 익절/손절/돌파 조건 대기')
         if force_exit:return wait('FLAT','가상 보유 없음')
-        if (now.hour,now.minute)>=(15,15):return wait('ENTRY_CUTOFF','15:15 이후 신규 진입 중지')
+        if (now.hour,now.minute)>=market_time(now,15,15):return wait('ENTRY_CUTOFF',session_info(now)['liquidate']+' 이후 신규 진입 중지')
         if s['cooldown_until'] and datetime.fromisoformat(s['cooldown_until'])>now:return wait('COOLDOWN','손절/돌파 실패 후 15분 대기')
         if confirmation['status']=='WAITING':return wait('DATA_WAIT',confirmation['message'])
         walls=confirmation['walls'];put=walls['put'];call=walls['call'];expiry=oi.get('expiry')

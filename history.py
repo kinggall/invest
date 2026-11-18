@@ -1,3 +1,4 @@
+from market_session import market_time, market_stamp
 """Historical minute retrieval using existing real tokens; never trading or issuing tokens."""
 from datetime import datetime, timedelta
 import json
@@ -42,12 +43,12 @@ class History:
             self.progress(date.isoformat()+' · 저장된 과거 분봉 읽는 중…')
             cached=[json.loads(r[0]) for r in self.db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',
                 (SYMBOL,date.isoformat(),(date+timedelta(days=1)).isoformat()))]
-            start=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
+            start=market_stamp(date,9)
             required={(start+timedelta(minutes=i)).isoformat() for i in range(380)}
             if required<={r['time'] for r in cached}:return cached
             self.progress('저장 분봉 누락 발견 · 한투에서 다시 조회하는 중…')
-        cursor=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=15,minute=30)
-        if date==now.date() and (now.hour,now.minute)<(15,31):
+        cursor=market_stamp(date,15,30)
+        if date==now.date() and (now.hour,now.minute)<market_time(now,15,31):
             cursor=min(cursor,now.replace(second=0,microsecond=0)-timedelta(minutes=1))
         rows={};intraday=False
         for page in range(24):
@@ -64,7 +65,7 @@ class History:
                     intraday=True
                     self.warnings.append(date.isoformat()+' 일별 분봉 요청 거절 · 당일 분봉 API로 보완')
                     continue
-                if 'OPSQ0008' in str(exc) and rows and cursor.hour==9 and cursor.minute<=1:
+                if 'OPSQ0008' in str(exc) and rows and cursor<=market_stamp(date,9)+timedelta(minutes=1):
                     self.warnings.append(date.isoformat()+' 장 시작 경계 조회 거절 · 이미 받은 분봉은 보존')
                     break
                 raise TradingError(date.isoformat()+' '+cursor.strftime('%H:%M')+' '+('당일' if intraday else '일별')+' 분봉 조회 실패 · '+str(exc)) from None
@@ -78,7 +79,7 @@ class History:
                 if item_date!=date.strftime('%Y%m%d'):continue
                 try:stamp=datetime.strptime(item_date+item['stck_cntg_hour'],'%Y%m%d%H%M%S').replace(tzinfo=KST)
                 except (ValueError,TypeError,KeyError):raise TradingError('HISTORY_TIME_INVALID') from None
-                if not (9<=stamp.hour<16) or stamp>cursor:continue
+                if not (market_stamp(date,9)<=stamp<=market_stamp(date,15,30)) or stamp>cursor:continue
                 if stamp.second:raise TradingError('HISTORY_NOT_MINUTE_DATA')
                 oldest=min(oldest,stamp) if oldest else stamp
                 row=dict(time=stamp.isoformat(),open=integer(item.get('stck_oprc'),'OPEN'),
@@ -89,12 +90,12 @@ class History:
                 if stamp in rows and rows[stamp]!=row:raise TradingError('HISTORY_CONFLICT')
                 rows[stamp]=row
             self.save_minutes(rows.values())
-            if oldest is None or oldest.hour==9 and oldest.minute==0:
+            if oldest is None or oldest==market_stamp(date,9):
                 break
             following=oldest-timedelta(minutes=1)
             if following>=cursor:raise TradingError('HISTORY_PAGINATION_STALLED')
             cursor=following
-            if cursor.hour<9:break
+            if cursor<market_stamp(date,9):break
         else:
             raise TradingError('HISTORY_PAGINATION_LIMIT')
         self.last_api_success=True
@@ -105,8 +106,8 @@ class History:
         try:
             for stamp,row in rows.items():
                 self.db.execute('INSERT OR REPLACE INTO minutes VALUES (?,?,?)',(SYMBOL,stamp.isoformat(),json.dumps(row)))
-            complete_day=date<now.date() or date==now.date() and (now.hour,now.minute)>=(15,31)
-            start=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
+            complete_day=date<now.date() or date==now.date() and (now.hour,now.minute)>=market_time(now,15,31)
+            start=market_stamp(date,9)
             complete_minutes={(start+timedelta(minutes=i)) for i in range(380)}
             if merged and complete_day and {d.isoformat() for d in complete_minutes}<={r['time'] for r in merged}:
                 self.db.execute('INSERT OR REPLACE INTO history_days VALUES (?,?,?,?)',
@@ -120,7 +121,7 @@ class History:
         now=now or datetime.now(KST)
         try:date=datetime.strptime(cutoff,'%Y-%m-%d').date()
         except (ValueError,TypeError):raise TradingError('조회일을 YYYY-MM-DD 형식으로 선택하세요.') from None
-        if date>now.date() or date==now.date() and (now.hour,now.minute)<(15,30):
+        if date>now.date() or date==now.date() and (now.hour,now.minute)<market_time(now,15,30):
             raise TradingError('장 종료 후 확정된 거래일만 조회하세요.')
         if date.weekday()>=5:raise TradingError('주말이 아닌 거래일을 선택하세요.')
         self.progress(cutoff+' · 과거 분봉 조회 준비 중…')
@@ -153,7 +154,7 @@ class History:
         chart.extend(macd(segment,config['fast'],config['slow'],config['signal']))
         selected=[bar for bar in chart if bar['time'][:10]==cutoff]
         if not selected:raise TradingError('완성된 3분봉이 없습니다. 누락된 분봉은 합성하지 않습니다.')
-        expected=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
+        expected=market_stamp(date,9)
         present={bar['time'] for bar in selected}
         # Continuous full bars through 15:15; auction-transition bars are optional.
         missing=[]

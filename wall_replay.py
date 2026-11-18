@@ -1,3 +1,4 @@
+from market_session import market_stamp
 """Offline OI-strategy replay with optional cached ETF price supplementation; never orders or source writes."""
 from collections import Counter
 from datetime import datetime,timedelta
@@ -190,11 +191,11 @@ def evaluate_frames(source,frames,parsed,capital,options,progress):
         warnings.append('현재 전략 코드로 초기 자금·미보유 상태에서 새로 실행합니다. 실제 가상 장부의 시작 보유나 수동 청산을 가져오지 않습니다.')
         if not ready:warnings.append('진입 판단에 필요한 자료가 동시에 충족된 표본이 없습니다. 거래 0건은 전략 성과의 증거가 아닙니다.')
         if result['quantity']:warnings.append('마지막 표본에도 미청산 보유가 있습니다. 마지막 관측 가격으로 평가했으며 임의로 장 마감 청산하지 않았습니다.')
-        if first[11:16]>'09:00' or last[11:16]<'15:15':warnings.append('전 거래시간을 포함하지 않는 기록입니다. 표시된 첫/마지막 표본 구간만 평가했습니다.')
+        if first[11:16]>market_stamp(parsed,9).strftime('%H:%M') or last[11:16]<market_stamp(parsed,15,15).strftime('%H:%M'):warnings.append('전 거래시간을 포함하지 않는 기록입니다. 표시된 첫/마지막 표본 구간만 평가했습니다.')
         return dict(date=date,mode=source['mode'],supplemented_samples=source.get('supplemented_samples',0),recorded_samples=source.get('recorded_samples',len(frames) if source['mode']=='recorded' else 0),symbol=TRADE_SYMBOL,capital=capital,first=first,last=last,samples=len(curve),ready_samples=ready,status_counts=dict(counts),
             final_equity=result['equity'],net_pnl=result['net_pnl'],return_pct=result['net_pnl']/capital*100,realized=result['state']['realized'],unrealized=result['unrealized'],fees=result['state']['fees'],
             valuation_at=result['state'].get('mark_at'),oi_first=min(oi_times) if oi_times else None,oi_last=max(oi_times) if oi_times else None,flow_first=min(flow_times) if flow_times else None,flow_last=max(flow_times) if flow_times else None,ready_first=ready_first,ready_last=ready_last,
             ending_quantity=result['quantity'],position=result['state']['position'],max_drawdown_pct=drawdown,round_trips=len(completed),win_rate_pct=sum(t['pnl']>0 for t in completed)/len(completed)*100 if completed else None,
             buy_count=sum(e['side']=='buy' for e in events),sell_count=sum(e['side']=='sell' for e in events),events=events,curve=curve,chart=list(sorted(chart.values(),key=lambda b:b['time'])),
-            periods=[list(p) for p in sorted(seen_periods)],manual_inputs_ignored=manual,warnings=warnings,rules=dict(RULES,**options),options=dict(options))
+            periods=[list(p) for p in sorted(seen_periods)],manual_inputs_ignored=manual,warnings=warnings,rules=dict(RULES,**options,force_close=market_stamp(parsed,15,15).strftime('%H:%M')),options=dict(options))
     finally:model.close()
