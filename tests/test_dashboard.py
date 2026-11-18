@@ -486,4 +486,35 @@ class DashboardTests(unittest.TestCase):
         for text in rows:
             self.assertNotIn('app_secret',text);self.assertNotIn('CANO',text);self.assertNotIn('Bearer',text)
 
+
+
+    def seed_saved_oi(self):
+        snapshot=dict(observed_at='2026-11-18T15:30:00+09:00',expiry='202612',radius_pct=5,spot=790,coverage_complete=True,
+            calls=[dict(side='call',strike=800,oi=100,received_at='2026-11-18T15:29:00+09:00')],
+            puts=[dict(side='put',strike=775,oi=200,received_at='2026-11-18T15:29:00+09:00')],
+            put_wall=dict(strike=775,oi=200),call_wall=dict(strike=800,oi=100),expiries=[dict(code='202612',label='202612')])
+        with self.app.db() as db:
+            db.execute('CREATE TABLE oi_snapshots (id INTEGER PRIMARY KEY,observed_at TEXT,expiry TEXT,payload TEXT)')
+            db.execute('INSERT INTO oi_snapshots(observed_at,expiry,payload) VALUES (?,?,?)',(snapshot['observed_at'],snapshot['expiry'],json.dumps(snapshot)))
+        return snapshot
+
+    def test_saved_oi_is_restored_for_display_without_network_or_live_eligibility(self):
+        original=self.seed_saved_oi()
+        with patch.object(d,'ReadOnlyDerivativesClient',side_effect=AssertionError('No network')):
+            restarted=d.Dashboard(self.app.home,self.app.state)
+        snapshot=restarted.oi_snapshot
+        self.assertTrue(snapshot['archived']);self.assertFalse(snapshot['coverage_complete'])
+        self.assertEqual(snapshot['calls'],original['calls'])
+        self.assertEqual(snapshot['put_wall']['strike'],775)
+        self.assertEqual(snapshot['observed_at'],original['observed_at'])
+        with self.app.db() as db:
+            self.assertEqual(json.loads(db.execute('SELECT payload FROM oi_snapshots').fetchone()[0]),original)
+
+    def test_failed_live_oi_refresh_keeps_saved_chart_available(self):
+        self.seed_saved_oi();self.app.oi_active=True
+        with patch.object(d.OIService,'collect',side_effect=TradingError('OI_QUOTE_REJECTED')):
+            self.app.run_oi(self.app.oi_config)
+        self.assertEqual(self.app.oi_job['state'],'failed')
+        self.assertTrue(self.app.oi_snapshot['archived']);self.assertTrue(self.app.oi_active)
+
 if __name__=='__main__':unittest.main()

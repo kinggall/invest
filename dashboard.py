@@ -109,7 +109,23 @@ class Dashboard:
         with self.db() as db:
             recording=db.execute("SELECT value FROM watch_settings WHERE name='oi_recording'").fetchone()
         self.oi_active=bool(recording and json.loads(recording[0]))
+        self.restore_oi()
         self.record_watch('SERVER_START',build=self.source_fingerprint[:12],oi_active=self.oi_active)
+
+    def restore_oi(self):
+        # Display persisted distribution without treating it as a new live input.
+        with self.db() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='oi_snapshots'").fetchone():return
+            expiry=self.oi_config.get('expiry')
+            sql='SELECT payload FROM oi_snapshots'+(' WHERE expiry=?' if expiry else '')+' ORDER BY id DESC LIMIT 20'
+            rows=db.execute(sql,(expiry,) if expiry else ()).fetchall()
+            snapshots=[json.loads(row[0]) for row in rows]
+            snapshot=next((s for s in snapshots if s.get('radius_pct')==self.oi_config['radius_pct'] and isinstance(s.get('spot'),(int,float)) and s['spot']>0 and s.get('calls') and s.get('puts')),None)
+            if not snapshot:return
+            snapshot.update(archived=True,restored=True,cached=False,coverage_complete=False)
+            snapshot['history']=OIService.history(SimpleNamespace(db=db),snapshot['expiry'],datetime.fromisoformat(snapshot['observed_at']))
+        self.oi_snapshot=snapshot
+        self.oi_job=dict(state='idle',message='최근 저장 풋콜월 분포 표시 · '+snapshot['observed_at']+' / 과거 참고 자료, 새 매매 판단에 사용하지 않음')
 
     def record_watch(self,kind,**fields):
         try:
@@ -204,7 +220,7 @@ class Dashboard:
                 with self.db() as records:
                     capture(records,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
                 if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
-                exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot
+                exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot if not (self.oi_snapshot or {}).get('archived') else {}
             with self.execution_lock:
                 self.record_watch('STRATEGY_INPUT',evaluated_at=observed.isoformat(),quote=quote,confirmation=assess(snapshot,oi_now,observed),oi_at=(oi_now or {}).get('observed_at'))
                 result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=self.demo_submission_allowed)
@@ -292,6 +308,7 @@ class Dashboard:
             self.record_watch('OI_ERROR',message=self.lookup_error(exc),config=cfg)
             with self.lock:
                 self.oi_snapshot=None
+                self.restore_oi()
                 self.last_oi=time.monotonic()
                 self.oi_job=dict(state='failed',message=self.lookup_error(exc)+' · 자동 기록 요청은 유지, 60초 후 재시도')
         finally:
@@ -367,7 +384,7 @@ class Dashboard:
             now=datetime.now(KST)
             session=now.weekday()<5 and market_time(now,8,45)<=(now.hour,now.minute)<market_time(now,15,45)
             with self.lock:
-                if self.oi_active and session and self.oi_job['state']!='running' and time.monotonic()-self.last_oi>=60:
+                if self.oi_active and self.oi_job['state']!='running' and (session and time.monotonic()-self.last_oi>=60 or self.oi_snapshot is None and self.last_oi==0):
                     self.request_oi(self.oi_config,True)
 
     def progress(self, job_id, message):
