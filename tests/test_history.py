@@ -68,3 +68,53 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(calls[0][3])
         with self.assertRaisesRegex(TradingError,'REAL_ROUTE_BLOCKED'):
             transport(ORDER,{}, {},True,base=REAL_BASE)
+
+
+    def test_current_day_rejection_uses_current_api_and_warmup_failure_is_nonfatal(self):
+        from trader import INTRADAY_HISTORY_PATH
+        original=self.source.request
+        def request(path,tr,params,post=False):
+            if path==HISTORY_PATH:raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+            self.assertEqual(path,INTRADAY_HISTORY_PATH);self.assertEqual(tr,'FHKST03010200')
+            self.assertNotIn('FID_INPUT_DATE_1',params)
+            result=original(HISTORY_PATH,'FHKST03010230',dict(params,FID_INPUT_DATE_1='20261118'))
+            result['output2']=result['output2'][:30]
+            for row in result['output2']:row.pop('stck_bsop_date')
+            return result
+        self.source.request=request
+        result=self.history.load('2026-11-18',DEFAULT,datetime(2026,11,18,18,tzinfo=KST))
+        self.assertEqual(len(result['chart']),130)
+        self.assertEqual(result['missing_bars'],[])
+        self.assertTrue(any('당일 분봉 API' in s for s in result['warnings']))
+        self.assertTrue(any('지표 준비용' in s for s in result['warnings']))
+        self.assertEqual(result['chart'][-1]['time'][11:16],'15:27')
+
+    def test_past_date_failure_never_falls_back_to_today_prices(self):
+        def request(path,tr,params,post=False):
+            self.assertEqual(path,HISTORY_PATH)
+            raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+        self.source.request=request
+        with self.assertRaisesRegex(TradingError,'2026-11-13 15:30'):
+            self.history.day(datetime(2026,11,13).date(),now=datetime(2026,11,18,18,tzinfo=KST))
+
+    def test_optional_previous_session_failure_does_not_hide_current_day(self):
+        original=self.source.request
+        def request(path,tr,params,post=False):
+            if params['FID_INPUT_DATE_1']=='20261112':raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+            return original(path,tr,params,post)
+        self.source.request=request
+        result=self.history.load('2026-11-13',DEFAULT,datetime(2026,11,18,18,tzinfo=KST))
+        self.assertEqual(len(result['chart']),130)
+        self.assertIsNone(result['warmup_date'])
+        self.assertTrue(any('2026-11-12' in s for s in result['warnings']))
+
+
+
+    def test_intraday_history_extension_remains_read_only(self):
+        from trader import INTRADAY_HISTORY_PATH
+        client=ReadOnlyHistoryClient(self.home)
+        for path,tr,post in [(INTRADAY_HISTORY_PATH,'FHKST03010200',True),(INTRADAY_HISTORY_PATH,'wrong',False),('/oauth2/tokenP',None,False),(None,None,False)]:
+            with self.assertRaisesRegex(TradingError,'READ_ONLY_HISTORY_ROUTE_BLOCKED'):
+                client.request(path,tr,{},post=post)
+
+if __name__=='__main__':unittest.main()

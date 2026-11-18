@@ -20,6 +20,7 @@ import urllib.parse
 BASE = 'https://openapivts.koreainvestment.com:29443'
 REAL_BASE = 'https://openapi.koreainvestment.com:9443'
 HISTORY_PATH = '/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice'
+INTRADAY_HISTORY_PATH = '/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice'
 OI_OPTIONS = '/uapi/domestic-futureoption/v1/quotations/display-board-callput'
 OI_EXPIRIES = '/uapi/domestic-futureoption/v1/quotations/display-board-option-list'
 OI_FUTURES = '/uapi/domestic-futureoption/v1/quotations/display-board-futures'
@@ -120,7 +121,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def transport(path, headers, payload, post, *, base=BASE):
-    if base != BASE and not (base == REAL_BASE and path in {HISTORY_PATH,*DERIVATIVE_READS} and not post):
+    if base != BASE and not (base == REAL_BASE and path in {HISTORY_PATH,INTRADAY_HISTORY_PATH,*DERIVATIVE_READS} and not post):
         raise TradingError('REAL_ROUTE_BLOCKED')
     url = base + path
     body = None
@@ -197,7 +198,7 @@ class SharedToken:
 
 
 class ReadOnlyHistoryClient:
-    """Existing real cache is permitted only for this one historical GET endpoint."""
+    """Existing real cache is permitted only for historical/current minute GETs."""
     def __init__(self, home, send=None, interval=0.2):
         self.tokens=SharedToken(home,'real')
         self.send=send
@@ -205,7 +206,8 @@ class ReadOnlyHistoryClient:
         self.last=0
 
     def request(self,path,tr_id,payload,post=False):
-        if path!=HISTORY_PATH or tr_id!='FHKST03010230' or post:
+        routes={HISTORY_PATH:'FHKST03010230',INTRADAY_HISTORY_PATH:'FHKST03010200'}
+        if path not in routes or routes[path]!=tr_id or post:
             raise TradingError('READ_ONLY_HISTORY_ROUTE_BLOCKED')
         data=read_only_get(self,REAL_BASE,path,tr_id,payload)
         if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':

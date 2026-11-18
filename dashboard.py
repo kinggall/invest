@@ -287,7 +287,9 @@ class Dashboard:
             if loaded:
                 result['chart']=loaded['chart']
                 result['downloaded_prices']=dict(source=loaded['source'],bars=len(loaded['chart']),missing_bars=loaded['missing_bars'])
-                result['warnings'].append('차트는 한투 전체 분봉입니다. 매매 판단이 가능한 구간과 가격만 보충된 구간은 다릅니다.')
+                result['warnings'].extend(loaded.get('warnings',[]))
+                result['warnings'].append('차트는 한투에서 확보한 분봉입니다. 매매 판단이 가능한 구간과 가격만 보충된 구간은 다릅니다.')
+                if loaded['missing_bars']:result['warnings'].append('ETF 3분봉 누락 '+str(len(loaded['missing_bars']))+'개: '+', '.join(loaded['missing_bars'][:8]))
             with self.lock:
                 self.replay_result=result;self.replay_job=dict(state='succeeded',message='저장 자료 백테스트/재생 완료'+(' · 필요 자료 동시 충족 0건: 성과 판단 보류' if not result['ready_samples'] else ''))
         except Exception as exc:
