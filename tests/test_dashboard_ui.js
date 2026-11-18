@@ -60,6 +60,14 @@ const context=vm.createContext({document,setInterval:()=>0,console,fetch:async(u
  vm.runInContext("drawOIBars({archived:true,spot:770,radius_pct:5,coverage_complete:false,puts:[{side:'put',strike:750,oi:100,stale:true}],calls:[{side:'call',strike:800,oi:200,stale:true}]})",context);
  assert.ok(elements.get('oiBars').children.some(n=>n.attrs.width>0),'archived stale OI remains visible as a reference');
  assert.match(elements.get('oiRangeNote').textContent,/현재 매매 판단에 사용하지 않음/);
+ const marker=elements.get('oiBars').children.find(n=>n.attrs['data-role']==='spot-marker');
+ assert.equal(marker.attrs.y1,37.2); // 770 lies 40% of the way from strike 750 to 800.
+ assert.match(elements.get('oiBars').children.find(n=>n.attrs['data-role']==='spot-label').textContent,/저장 당시 현물 770pt/);
+ vm.runInContext("drawOIBars({spot:787.71,observed_at:new Date().toISOString(),radius_pct:5,puts:[{side:'put',strike:787.5,oi:100,received_at:new Date().toISOString()}],calls:[{side:'call',strike:790,oi:200,received_at:new Date().toISOString()}]})",context);
+ const currentMarker=elements.get('oiBars').children.find(n=>n.attrs['data-role']==='spot-marker');
+ assert.ok(Math.abs(currentMarker.attrs.y1-31.512)<1e-9);
+ assert.match(elements.get('oiBars').children.find(n=>n.attrs['data-role']==='spot-label').textContent,/현재 현물 787.71pt/);
+
 
  vm.runInContext("drawOIBars({spot:770,radius_pct:5,puts:[],calls:[{side:'call',strike:1595,oi:10000}]})",context);assert.equal(elements.get('oiRows').children.length,0);
  vm.runInContext("drawOIBars({spot:null,radius_pct:5,puts:[],calls:[{side:'call',strike:1595,oi:10000}]})",context);assert.equal(elements.get('oiRows').children.length,0);assert.match(elements.get('oiRangeNote').textContent,/현재 지수 미수신/);
