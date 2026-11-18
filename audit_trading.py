@@ -1,9 +1,12 @@
-"""Read-only trading audit: no tokens, network calls, orders or ledger repairs."""
+"""Read-only trading audit; optional existing-token market GET, never orders or ledger repairs."""
 import argparse
 from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
+import os
+import sqlite3
+from types import SimpleNamespace
 from pathlib import Path
 from trader import TradingError, KST
 from instruments import TRADE_SYMBOL
@@ -99,18 +102,53 @@ def audit(database,day):
     return report
 
 
+def fetch_price_evidence(report,home,client=None):
+    from history import History
+    from trader import ReadOnlyHistoryClient
+    memory=sqlite3.connect(':memory:',isolation_level=None)
+    try:
+        memory.execute('CREATE TABLE minutes (symbol TEXT,stamp TEXT,value TEXT,PRIMARY KEY(symbol,stamp))')
+        reader=History(SimpleNamespace(db=memory),client=client or ReadOnlyHistoryClient(home),progress=lambda message:None)
+        rows=reader.day(datetime.strptime(report['date'],'%Y-%m-%d').date())
+    finally:memory.close()
+    entry=(report.get('inference') or {}).get('entry_fill_at');stop=report['current_ledger_position'].get('stop_price')
+    after=[r for r in rows if entry and r['time']>=entry]
+    low=next((r for r in after if stop and r['low']<=stop),None)
+    close=next((r for r in after if stop and r['close']<=stop),None)
+    def sample(row):return {k:row[k] for k in ('time','low','close')} if row else None
+    report['downloaded_price_evidence']=dict(source='한투 실전 시세 GET · KODEX 200 실제 1분봉',samples=len(rows),first=rows[0]['time'] if rows else None,last=rows[-1]['time'] if rows else None,
+        stop_price=stop,first_low_below_stop=sample(low),first_close_below_stop=sample(close),
+        note='단일 진입 이후 실제 시장 가격의 손절선 이탈 확인입니다. 당시 프로그램 수신·매도 판단을 증명하지 않습니다. 선물 가격을 현물 지수 손절선과 직접 비교하지 않습니다.' if entry else '단일 진입 평단을 확인할 수 없어 손절선 비교를 보류했습니다.')
+    report['method']='로컬 장부는 읽기 전용 · 실제 1분봉은 기존 실전 토큰으로 GET · 주문/토큰 발급 없음'
+    return report
+
+
+def local_home(value=None):
+    if value:return Path(value)
+    if os.environ.get('DOMINO_HOME'):return Path(os.environ['DOMINO_HOME'])
+    if os.environ.get('LOCALAPPDATA'):
+        path=Path(os.environ['LOCALAPPDATA'])/'invest'/'settings.json'
+        if path.is_file():return Path(json.loads(path.read_text(encoding='utf-8-sig'))['domino_home'])
+    raise TradingError('DOMINO_HOME_REQUIRED')
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--date',default=datetime.now(KST).date().isoformat())
     parser.add_argument('--state',type=Path,default=Path(__file__).parent/'runtime'/'orders.sqlite3')
+    parser.add_argument('--fetch-prices',action='store_true',help='Read actual ETF minute prices with the existing real token; never orders')
+    parser.add_argument('--domino-home',type=Path)
     args=parser.parse_args()
     try:
         result=audit(args.state,args.date)
+        if args.fetch_prices:result=fetch_price_evidence(result,local_home(args.domino_home))
         target=args.state.parent/('audit-'+args.date+'.json')
         target.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8');target.chmod(0o600)
         print(json.dumps({k:result[k] for k in ('evidence','observations','current_ledger_position','inference')},ensure_ascii=False,indent=2))
+        if result.get('downloaded_price_evidence'):print(json.dumps(result['downloaded_price_evidence'],ensure_ascii=False,indent=2))
         print('진단 파일: '+str(target))
-    except (TradingError,ValueError,OSError):raise SystemExit('진단 실패: 날짜와 runtime 모의 장부 파일을 확인하세요.')
+    except TradingError as exc:raise SystemExit('진단/시세 조회 실패: '+str(exc))
+    except (ValueError,OSError):raise SystemExit('진단 실패: 날짜와 runtime 모의 장부 파일을 확인하세요.')
 
 
 if __name__=='__main__':main()

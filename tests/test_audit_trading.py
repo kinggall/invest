@@ -71,3 +71,22 @@ class AuditTests(unittest.TestCase):
         report=audit(self.path,'2026-11-16')
         self.assertFalse(report['evidence']['trace_available'])
         self.assertIn('확정 불가',report['evidence']['conclusion'])
+
+
+    def test_actual_minute_query_finds_crossing_without_writing_ledgers(self):
+        at=self.enter()
+        import sqlite3
+        db=sqlite3.connect(self.path);ensure_observations(db);db.commit();db.close()
+        before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in (self.path,self.path.with_name('orders.demo.sqlite3'))}
+        from audit_trading import fetch_price_evidence
+        from unittest.mock import Mock
+        client=Mock()
+        def bar(hour,price):
+            return dict(stck_bsop_date='20261116',stck_cntg_hour=hour,stck_oprc=str(price),stck_hgpr=str(price),stck_lwpr=str(price),stck_prpr=str(price),cntg_vol='10')
+        client.request.return_value=dict(output1=dict(stck_shrn_iscd='069500'),output2=[bar('103400',9800),bar('090000',10000)])
+        report=fetch_price_evidence(audit(self.path,'2026-11-16'),None,client)
+        evidence=report['downloaded_price_evidence']
+        self.assertEqual(evidence['first_close_below_stop']['time'],'2026-11-16T10:34:00+09:00')
+        self.assertEqual(client.request.call_args.args[1],'FHKST03010230')
+        self.assertFalse(client.order.called)
+        for path,digest in before.items():self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(),digest)

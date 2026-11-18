@@ -13,7 +13,7 @@ import threading
 import time
 import webbrowser
 
-from trader import DemoClient, SharedToken, TradingError, KST, is_rate_limit
+from trader import DemoClient, SharedToken, TradingError, KST, is_rate_limit, ReadOnlyDerivativesClient, OI_INDEX, DERIVATIVE_READS
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from instruments import PREVIOUS_SYMBOL, ETF_FEE_BPS
 from confirmation import assess
@@ -45,6 +45,9 @@ class Dashboard:
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.io_lock = threading.Lock()
+        self.execution_lock=threading.RLock()
+        self.protection_retry_after=0
+        self.protection_health=dict(state='STOPPED',last_attempt=None,last_success=None,error=None)
         self.oi_lock=threading.Lock()
         self.oi_active=False
         self.oi_snapshot=None
@@ -136,7 +139,13 @@ class Dashboard:
                 message='15:19 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 확인하세요 / '+self.wall_message
             if source_fingerprint()!=self.source_fingerprint:
                 message+=' / 서버 코드가 갱신됐습니다. Ctrl+C로 종료 후 재시작해야 합니다.'
-            return dict(result,order_window_open=open_window,account_job=dict(self.account_job),enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=message)
+            health=dict(self.protection_health)
+            if open_window and result['quantity'] and (self.wall_enabled or self.day_exit_armed):
+                last=health.get('last_success') or health.get('last_attempt')
+                elapsed=(now-datetime.fromisoformat(last)).total_seconds() if last else None
+                if elapsed is not None and elapsed>45 and health['state']!='ERROR':
+                    health.update(state='STALE',error='보유 감시가 45초 이상 지연됐습니다. 연결과 최근 오류를 확인하세요.')
+            return dict(result,protection=health,order_window_open=open_window,account_job=dict(self.account_job),enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=message)
         finally:paper.close()
 
     def wall_tick(self,snapshot,client):
@@ -144,8 +153,7 @@ class Dashboard:
         if clock.weekday()<5 and (clock.hour,clock.minute)>=(15,15):return
         if source_fingerprint()!=self.source_fingerprint:
             with self.lock:
-                self.wall_enabled=False;self.wall_exit_requested=False
-                self.wall_message='코드 갱신 감지 · 가상 시뮬레이션 중지, 서버를 재시작하세요.'
+                self.wall_message='코드 갱신 감지 · 신규 진입 차단, 독립 보유 감시·청산 유지 · 서버 재시작 필요'
             return
         with self.lock:active=self.wall_enabled;exit_requested=self.wall_exit_requested
         if not active and not exit_requested:return
@@ -160,13 +168,14 @@ class Dashboard:
                 # Stop is checked again after network I/O. A stopped simulator fills nothing.
                 if not self.wall_enabled and not self.wall_exit_requested:return
                 if source_fingerprint()!=self.source_fingerprint:
-                    self.wall_enabled=False;self.wall_exit_requested=False;self.wall_message='코드 갱신 감지 · 서버 재시작 필요';return
+                    self.wall_message='코드 갱신 감지 · 신규 진입 차단, 독립 보유 감시·청산 유지 · 서버 재시작 필요';return
                 observed=datetime.now(KST)
                 with self.db() as records:
                     capture(records,snapshot,self.oi_snapshot or {},quote,observed,self.wall_exit_requested)
                 if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
                 exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot
-            result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=self.demo_submission_allowed)
+            with self.execution_lock:
+                result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=self.demo_submission_allowed)
             with self.lock:
                 if self.wall_enabled or self.wall_exit_requested:self.wall_message=result['state']['message']
                 if self.wall_exit_requested and not result['quantity'] and not result.get('pending_count'):
@@ -420,11 +429,12 @@ class Dashboard:
                     if self.oi_job['state']=='running':self.oi_active=True
                     else:self.request_oi(self.oi_config,True)
                 self.wall_enabled=True;self.day_exit_armed=True;self.wall_exit_requested=False
+                self.protection_health.update(state='STARTING',last_attempt=datetime.now(KST).isoformat(),error=None)
                 self.wall_message='한투 모의매매 시작 · OI/ETF 자료 준비 후 신호에 따라 모의주문 전송'
                 self.last_refresh=0
             elif command=='wall_stop':
                 self.wall_enabled=False;self.wall_exit_requested=False
-                self.wall_message='신규 매매·손절 감시 중지 · 체결 조회와 15:15 당일 전량청산은 유지'
+                self.wall_message='신규 진입 중지 · 기존 보유 손절·익절 감시와 당일 전량청산은 유지'
             elif command=='wall_reset':
                 if self.wall_enabled or self.wall_exit_requested:raise TradingError('시뮬레이션을 먼저 중지하세요.')
                 paper=WallBroker(self.state)
@@ -479,7 +489,7 @@ class Dashboard:
     def run_account_sync(self):
         broker=None
         try:
-            with self.io_lock:
+            with self.io_lock,self.execution_lock:
                 broker=WallBroker(self.state,self.client())
                 broker.sync() # GET-only: no cancellation or new order.
                 balance=broker.check_balance()
@@ -505,26 +515,82 @@ class Dashboard:
         now=datetime.now(KST)
         closing=(self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,15)
         if not pending and not closing:return
-        if source_fingerprint()!=self.source_fingerprint:return
         broker=WallBroker(self.state,self.client())
         try:
-            if closing:
-                result=broker.step({}, {}, {},now=now,force_exit=True,
-                    may_submit=self.demo_submission_allowed)
-            else:result=broker.sync(now)
+            with self.execution_lock:
+                if closing:
+                    result=broker.step({}, {}, {},now=now,force_exit=True,protect_only=True,
+                        may_submit=self.exit_submission_allowed)
+                else:result=broker.sync(now)
             self.wall_message=result['state']['message']
             if self.wall_exit_requested and not result['quantity'] and not result['pending_count']:
                 self.wall_exit_requested=False;self.wall_enabled=False
         finally:broker.close()
 
+    def exit_submission_allowed(self):
+        now=datetime.now(KST)
+        return ((self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5
+                and (9,0)<=(now.hour,now.minute)<(15,20))
+
+    def protection_tick(self):
+        now=datetime.now(KST)
+        if not (self.wall_enabled or self.wall_exit_requested or self.day_exit_armed):
+            self.sync_demo() # Existing orders can still be polled read-only.
+            return
+        with self.lock:self.protection_health.update(last_attempt=now.isoformat())
+        if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,15):
+            self.sync_demo()
+            with self.lock:self.protection_health.update(state='CLOSING' if (15,15)<=(now.hour,now.minute)<(15,20) else 'CLOSED',error=None)
+            return
+        local=WallBroker(self.state)
+        try:view=local.view()
+        finally:local.close()
+        if not view['quantity'] and not view['pending_count']:
+            with self.lock:self.protection_health.update(state='FLAT',last_success=now.isoformat(),error=None)
+            return
+        client=self.client();quote={};index={};index_error=None
+        if view['quantity']:
+            price=client.quote(SYMBOL)
+            quote=dict(symbol=SYMBOL,price=price,observed_at=datetime.now(KST).isoformat())
+            p=view['state']['position']
+            if not WallBroker.protection_reason(p,quote,{},datetime.now(KST)) and not self.wall_exit_requested:
+                try:
+                    reader=ReadOnlyDerivativesClient(self.home)
+                    out=reader.request(OI_INDEX,DERIVATIVE_READS[OI_INDEX],dict(FID_COND_MRKT_DIV_CODE='U',FID_INPUT_ISCD='2001')).get('output')
+                    if isinstance(out,list):out=out[0] if len(out)==1 else None
+                    from oi import number
+                    value=number(out.get('bstp_nmix_prpr'),'PROTECTION_INDEX') if isinstance(out,dict) else None
+                    if not value or value<=0:raise TradingError('PROTECTION_INDEX_MISSING')
+                    index=dict(symbol='2001',price=value,observed_at=datetime.now(KST).isoformat())
+                except Exception as exc:index_error=self.record_demo_error('보유 감시 지수 조회 · ETF 손절은 계속',exc)
+        broker=WallBroker(self.state,client)
+        try:
+            with self.execution_lock:
+                if view['quantity'] and not WallBroker.quote_valid(quote,datetime.now(KST)):
+                    quote=dict(symbol=SYMBOL,price=client.quote(SYMBOL),observed_at=datetime.now(KST).isoformat())
+                result=broker.step({}, {}, quote,now=datetime.now(KST),force_exit=self.wall_exit_requested,
+                    protect_only=True,index=index,may_submit=self.exit_submission_allowed)
+            with self.lock:
+                self.wall_message=result['state']['message']
+                self.protection_health.update(state='DEGRADED' if index_error else 'RUNNING',last_success=datetime.now(KST).isoformat(),
+                    error=index_error,price=quote.get('price'),index=index.get('price'),decision=result['state']['status'])
+                if self.wall_exit_requested and not result['quantity'] and not result['pending_count']:
+                    self.wall_exit_requested=False;self.wall_enabled=False
+        finally:broker.close()
+
+    def protection_worker(self):
+        while not self.shutdown.wait(5):
+            if time.monotonic()<self.protection_retry_after:continue
+            try:self.protection_tick()
+            except Exception as exc:
+                message=self.record_demo_error('독립 보유 감시·청산',exc)
+                self.protection_retry_after=time.monotonic()+30
+                with self.lock:
+                    self.wall_message=message+' · 보호 감시 재시도 대기'
+                    self.protection_health.update(state='ERROR',error=message,last_attempt=datetime.now(KST).isoformat())
+
     def worker(self):
         while not self.shutdown.wait(10):
-            if self.io_lock.acquire(blocking=False):
-                try:self.sync_demo()
-                except Exception as exc:
-                    message=self.record_demo_error('모의체결 조회·당일 청산',exc)
-                    with self.lock:self.wall_message=message+' · 모의체결 조회 보류'
-                finally:self.io_lock.release()
             with self.lock:
                 execute=self.enabled
                 wall_due=(self.wall_enabled or self.wall_exit_requested) and datetime.now(KST).weekday()<5 and (9,0)<=(datetime.now(KST).hour,datetime.now(KST).minute)<(15,20)
@@ -606,6 +672,7 @@ def main():
     app = Dashboard(args.domino_home, args.state)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(app))
     threading.Thread(target=app.worker, daemon=True).start()
+    threading.Thread(target=app.protection_worker, daemon=True).start()
 
     threading.Thread(target=app.oi_worker, daemon=True).start()
     threading.Thread(target=app.future_worker, daemon=True).start()

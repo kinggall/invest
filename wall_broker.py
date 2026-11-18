@@ -5,7 +5,8 @@ import json
 import math
 from pathlib import Path
 import uuid
-from wall_paper import WallPaper, RULES, quantity, average
+from wall_paper import WallPaper, RULES, quantity, average, fresh
+from confirmation import numeric
 from instruments import TRADE_SYMBOL
 from trader import Engine, TradingError, OrderNotSent, KST
 
@@ -97,7 +98,7 @@ class WallBroker(WallPaper):
                         raise TradingError('이전 전략의 미체결/접수 확인 필요 모의주문을 먼저 확인하세요.')
             finally:db.close()
 
-    def sync(self,now=None,allow_cancel=False):
+    def sync(self,now=None,allow_cancel=False,urgent_exit=False):
         now=now or datetime.now(KST);changed=False
         for row in self.pending():
             meta=json.loads(row['meta'])
@@ -170,7 +171,7 @@ class WallBroker(WallPaper):
             strategy=json.loads(row['strategy'])
             full_market_exit=(strategy['side']=='sell' and strategy.get('order_type')=='market'
                               and row['quantity']-filled==quantity(self.load()['position']))
-            cancel_due=(closing and not full_market_exit) or (not closing and (now-datetime.fromisoformat(meta['time'])).total_seconds()>=30)
+            cancel_due=not full_market_exit and (urgent_exit or closing or (now-datetime.fromisoformat(meta['time'])).total_seconds()>=30)
             if allow_cancel and not terminal and not meta.get('cancel_requested') and cancel_due:
                 self.db.execute('BEGIN IMMEDIATE')
                 try:
@@ -193,12 +194,38 @@ class WallBroker(WallPaper):
             self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('balance',?)",(json.dumps(balance),))
         return self.view()
 
-    def step(self,snapshot,oi,quote,now=None,force_exit=False,may_submit=None):
+    @staticmethod
+    def quote_valid(quote,now):
+        return (quote.get('symbol')==TRADE_SYMBOL and numeric(quote.get('price')) and quote['price']>0
+                and fresh(quote.get('observed_at'),now,20))
+
+    @classmethod
+    def protection_reason(cls,p,quote,index,now):
+        if not quantity(p) or not cls.quote_valid(quote,now):return None
+        price=quote['price']
+        if p['entry_day']!=now.date().isoformat():return 'OVERNIGHT_EXIT'
+        if price<=p['stop_price']:
+            return 'PROFIT_PROTECT' if p['protected'] and price>=average(p)*.99 else 'ETF_STOP'
+        if not (index.get('symbol')=='2001' and numeric(index.get('price')) and index['price']>0
+                and fresh(index.get('observed_at'),now,30)):return None
+        spot=index['price']
+        if spot<=p['put_stop']:return 'PUT_STOP'
+        added=sum(lot['quantity'] for lot in p['lots'] if lot['kind']=='add')
+        if added and spot<=p['call']*.998:return 'BREAKOUT_FAIL'
+        for number in (1,2):
+            if not p['tp'+str(number)] and spot>=p['target'+str(number)] and math.floor(p['original_quantity']*.3):
+                return 'TAKE_PROFIT_'+str(number)
+        return None
+
+    def step(self,snapshot,oi,quote,now=None,force_exit=False,may_submit=None,protect_only=False,index=None):
         if self.client is None:raise TradingError('DEMO_CLIENT_REQUIRED')
         now=now or datetime.now(KST)
         self.may_submit=may_submit
-        self.trace('EVALUATION_STARTED',now,quantity=quantity(self.load()['position']),force_exit=bool(force_exit),closing=(now.hour,now.minute)>=(15,15))
-        self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
+        quote=quote or {};index=index or {}
+        position=self.load()['position']
+        reason=self.protection_reason(position,quote,index,now) if protect_only else None
+        self.trace('EVALUATION_STARTED',now,quantity=quantity(position),force_exit=bool(force_exit),closing=(now.hour,now.minute)>=(15,15),protect_only=protect_only,price=quote.get('price'),quote_at=quote.get('observed_at'),spot=index.get('price'),index_at=index.get('observed_at'))
+        self.sync(now,urgent_exit=bool(force_exit or reason in ('ETF_STOP','PROFIT_PROTECT','PUT_STOP','OVERNIGHT_EXIT')),allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
         regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
         closing=now.weekday()<5 and (now.hour,now.minute)>=(15,15)
         pending=self.pending()
@@ -227,6 +254,18 @@ class WallBroker(WallPaper):
                         raise Intent(state,position,'DAY_EXIT' if closing else 'MANUAL_EXIT','sell',amount,reference,None,now,{})
                     state.update(armed=None,status='CLOSED_FLAT' if closing else 'FLAT',
                         message='당일 청산 확인 완료 · 보유 0 / 미체결 0' if closing else '보유 없음',updated_at=now.isoformat())
+                elif protect_only:
+                    position=state['position'];amount=quantity(position)
+                    if not amount:state.update(status='FLAT',message='확인된 보유 없음 · 신규 진입은 전략에서만 판단')
+                    elif not self.quote_valid(quote,now):state.update(status='PROTECTION_DATA_WAIT',message='최신 ETF 현재가 미수신 · 보유 보호 감시 확인 필요')
+                    else:
+                        state.update(last_price=quote['price'],mark_at=quote['observed_at'],updated_at=now.isoformat())
+                        reason=self.protection_reason(position,quote,index,now)
+                        if reason:
+                            if reason=='BREAKOUT_FAIL':amount=sum(lot['quantity'] for lot in position['lots'] if lot['kind']=='add')
+                            elif reason.startswith('TAKE_PROFIT_'):amount=min(amount,math.floor(position['original_quantity']*.3))
+                            if amount:raise Intent(state,position,reason,'sell',amount,quote['price'],index.get('price'),now,{'source':'independent_protection'})
+                        state.update(status='HOLDING',message='독립 보유 감시 · ETF 현재가 '+str(quote['price'])+'원')
                 else:state=self.advance(state,snapshot or {},oi or {},quote or {},now,force_exit)
             except Intent as signal:
                 intent=signal.value;state=intent['state']

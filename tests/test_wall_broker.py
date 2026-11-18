@@ -272,3 +272,56 @@ class BrokerTests(unittest.TestCase):
             error=other.view()['last_error']
             self.assertEqual(error['stage'],'당일 청산');self.assertEqual(error['message'],'SHARED_DEMO_TOKEN_UNAVAILABLE')
         finally:other.close()
+
+
+class IndependentProtectionTests(unittest.TestCase):
+    setUp=BrokerTests.setUp
+    data=BrokerTests.data
+    step=BrokerTests.step
+    enter=BrokerTests.enter
+    fill=BrokerTests.fill
+    def opened(self):
+        self.enter();self.fill();return self.start+timedelta(minutes=4)
+
+    def test_etf_stop_without_any_indicators_or_oi(self):
+        now=self.opened()
+        v=self.book.step({}, {}, dict(symbol='069500',price=9800,observed_at=now.isoformat()),now=now,protect_only=True)
+        self.assertEqual(self.client.sent[-1]['side'],'sell')
+        self.assertEqual(self.client.sent[-1]['order_type'],'market')
+        self.assertEqual(v['orders'][0]['reason'],'ETF_STOP')
+
+    def test_spot_stop_uses_fresh_spot_without_macd_or_flow(self):
+        now=self.opened();p=self.book.load()['position']
+        v=self.book.step({}, {}, dict(symbol='069500',price=10010,observed_at=now.isoformat()),now=now,protect_only=True,
+            index=dict(symbol='2001',price=p['put_stop']-.1,observed_at=now.isoformat()))
+        self.assertEqual(v['orders'][0]['reason'],'PUT_STOP')
+        self.assertEqual(self.client.sent[-1]['order_type'],'market')
+
+    def test_stale_quote_cannot_trigger_stop(self):
+        now=self.opened()
+        v=self.book.step({}, {}, dict(symbol='069500',price=9800,observed_at=(now-timedelta(seconds=21)).isoformat()),now=now,protect_only=True)
+        self.assertEqual(len(self.client.sent),1)
+        self.assertEqual(v['state']['status'],'PROTECTION_DATA_WAIT')
+
+    def test_protection_never_enters_new_positions(self):
+        now=self.start
+        for offset in (0,3,6):
+            at=now+timedelta(minutes=offset)
+            self.book.step(*self.data(at),now=at,protect_only=True)
+        self.assertEqual(self.client.sent,[])
+
+    def test_stale_spot_cannot_trigger_stop(self):
+        now=self.opened();p=self.book.load()['position']
+        self.book.step({}, {}, dict(symbol='069500',price=10010,observed_at=now.isoformat()),now=now,protect_only=True,
+            index=dict(symbol='2001',price=p['put_stop']-.1,observed_at=(now-timedelta(seconds=31)).isoformat()))
+        self.assertEqual(len(self.client.sent),1)
+
+
+    def test_protective_market_exit_is_not_cancelled_after_thirty_seconds(self):
+        now=self.opened();q=self.book.view()['quantity']
+        self.book.step({}, {}, dict(symbol='069500',price=9800,observed_at=now.isoformat()),now=now,protect_only=True)
+        self.client.matches['2']=('PARTIAL',3,29400);self.client.holdings=q-3
+        later=now+timedelta(seconds=40)
+        self.book.step({}, {}, dict(symbol='069500',price=9800,observed_at=later.isoformat()),now=later,protect_only=True)
+        self.assertEqual(self.client.cancelled,[])
+        self.assertEqual(len(self.client.sent),2)

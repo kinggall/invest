@@ -412,4 +412,33 @@ class DashboardTests(unittest.TestCase):
             with self.assertRaisesRegex(TradingError,'실행시간'):self.app.action('wall_close',{})
         self.assertFalse(self.app.wall_exit_requested)
 
+
+    def test_independent_stop_runs_while_indicator_io_is_locked(self):
+        import test_wall_broker as fixtures
+        from datetime import datetime,timedelta
+        from trader import KST
+        from wall_broker import WallBroker
+        now=datetime(2026,11,16,10,30,10,tzinfo=KST)
+        client=fixtures.Demo();book=WallBroker(self.app.state,client)
+        self.addCleanup(book.close)
+        data=fixtures.BrokerTests.data
+        book.step(*data(self,now),now=now)
+        at=now+timedelta(minutes=3)
+        book.step(*data(self,at),now=at)
+        q=client.sent[-1]['quantity'];client.holdings=q
+        client.matches['1']=('FILLED',q,q*10010);book.sync(at+timedelta(seconds=5))
+        client.quote=Mock(return_value=9800)
+        self.app.day_exit_armed=True # Stopped entries still protect existing holdings.
+        with patch.object(d,'datetime') as clock,patch.object(self.app,'client',return_value=client),patch.object(self.app,'engine',side_effect=AssertionError('Indicators must not run')),patch.object(d,'source_fingerprint',return_value='changed'):
+            clock.now.return_value=at+timedelta(minutes=1)
+            self.assertFalse(self.app.demo_submission_allowed())
+            self.assertTrue(self.app.exit_submission_allowed())
+            self.app.io_lock.acquire()
+            try:self.app.protection_tick()
+            finally:self.app.io_lock.release()
+        self.assertEqual(client.sent[-1]['side'],'sell')
+        self.assertEqual(client.sent[-1]['order_type'],'market')
+        self.assertEqual(self.app.protection_health['state'],'RUNNING')
+        self.assertEqual(book.view()['orders'][0]['reason'],'ETF_STOP')
+
 if __name__=='__main__':unittest.main()
