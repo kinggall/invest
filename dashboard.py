@@ -13,7 +13,8 @@ import threading
 import time
 import webbrowser
 
-from trader import DemoClient, SharedToken, TradingError, KST, is_rate_limit, ReadOnlyDerivativesClient, OI_INDEX, DERIVATIVE_READS
+from types import SimpleNamespace
+from trader import ReadOnlyHistoryClient, DemoClient, SharedToken, TradingError, KST, is_rate_limit, ReadOnlyDerivativesClient, OI_INDEX, DERIVATIVE_READS
 from macd_strategy import MacdEngine, DEFAULT, validate, SYMBOL
 from instruments import PREVIOUS_SYMBOL, ETF_FEE_BPS
 from confirmation import assess
@@ -275,7 +276,17 @@ class Dashboard:
 
     def run_replay(self,value,cfg):
         try:
-            result=replay(self.state,value.get('date'),cfg,value.get('capital',10000000),value.get('mode','auto'),self.replay_progress,options=value.get('options'))
+            filled=bool(value.get('fetch_prices',False));loaded=None
+            if filled:
+                self.replay_progress('한투에서 선택일 ETF 전체 분봉을 조회·저장하는 중…')
+                # Real quote token only; never construct a demo order client here.
+                with self.db() as db:
+                    loaded=History(SimpleNamespace(db=db),client=ReadOnlyHistoryClient(self.home),progress=self.replay_progress).load(value.get('date'),cfg)
+            result=replay(self.state,value.get('date'),cfg,value.get('capital',10000000),value.get('mode','auto'),self.replay_progress,options=value.get('options'),supplement=filled)
+            if loaded:
+                result['chart']=loaded['chart']
+                result['downloaded_prices']=dict(source=loaded['source'],bars=len(loaded['chart']),missing_bars=loaded['missing_bars'])
+                result['warnings'].append('차트는 한투 전체 분봉입니다. 매매 판단이 가능한 구간과 가격만 보충된 구간은 다릅니다.')
             with self.lock:
                 self.replay_result=result;self.replay_job=dict(state='succeeded',message='저장 자료 백테스트/재생 완료'+(' · 필요 자료 동시 충족 0건: 성과 판단 보류' if not result['ready_samples'] else ''))
         except Exception as exc:

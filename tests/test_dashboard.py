@@ -441,4 +441,19 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.app.protection_health['state'],'RUNNING')
         self.assertEqual(book.view()['orders'][0]['reason'],'ETF_STOP')
 
+
+
+    def test_replay_downloads_real_history_without_demo_client_and_uses_supplement(self):
+        baseline=self.app.wall_status()['state']
+        result=dict(ready_samples=1,mode='hybrid',warnings=[])
+        loaded=dict(chart=[dict(time='2026-11-16T15:15:00+09:00')],source='KIS historical',missing_bars=[])
+        with patch.object(d,'History') as history,patch.object(d,'ReadOnlyHistoryClient') as reader,patch.object(d,'replay',return_value=result) as run,patch.object(self.app,'client',side_effect=AssertionError('No demo client')):
+            history.return_value.load.return_value=loaded
+            self.app.run_replay(dict(date='2026-11-16',fetch_prices=True),self.app.strategy())
+        reader.assert_called_once_with(self.app.home)
+        self.assertTrue(run.call_args.kwargs['supplement'])
+        self.assertEqual(self.app.replay_job['state'],'succeeded')
+        self.assertEqual(self.app.replay_result['chart'],loaded['chart'])
+        self.assertEqual(self.app.wall_status()['state'],baseline)
+
 if __name__=='__main__':unittest.main()

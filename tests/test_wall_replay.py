@@ -165,3 +165,44 @@ class ReplayTests(unittest.TestCase):
         from wall_paper import strategy_options
         for bad in (True,{'macd_filter':'false'},{'rebound_bars':4},{'rebound_bars':True},{'unknown':True}):
             with self.assertRaises(TradingError):strategy_options(bad)
+
+    def seed_tail_prices(self,stopped=False):
+        for offset in (0,3):
+            now=self.start+timedelta(minutes=offset);capture(self.book.db,*self.frame(now),now)
+        self.book.db.execute('CREATE TABLE minutes (symbol TEXT,stamp TEXT,value TEXT)')
+        for stamp,opening,closing in [('10:33',20000,20000),('12:48',9800 if stopped else 10000,9000),('15:15',10050,10050),('15:19',10040,10040)]:
+            at='2026-11-16T'+stamp+':00+09:00'
+            row=dict(time=at,open=opening,close=closing,high=max(opening,closing),low=min(opening,closing),volume=1)
+            self.book.db.execute('INSERT INTO minutes VALUES (?,?,?)',(TRADE_SYMBOL,at,json.dumps(row)))
+
+    def test_missing_afternoon_prices_extend_mark_and_close_without_inventing_oi(self):
+        self.seed_tail_prices()
+        before=hashlib.sha256(self.path.read_bytes()).hexdigest()
+        result=replay(self.path,'2026-11-16',DEFAULT,supplement=True)
+        self.assertEqual(result['mode'],'hybrid')
+        self.assertEqual(result['last'],'2026-11-16T15:19:00+09:00')
+        self.assertEqual(result['ending_quantity'],0)
+        self.assertEqual([e['reason'] for e in result['events']],['REBOUND_ENTRY','DAY_EXIT'])
+        self.assertEqual(result['events'][1]['reference_price'],10050)
+        self.assertEqual(result['supplemented_samples'],3)
+        self.assertEqual(result['buy_count'],1)
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)
+
+    def test_afternoon_open_below_etf_stop_exits_without_oi_or_future_close(self):
+        self.seed_tail_prices(stopped=True)
+        result=replay(self.path,'2026-11-16',DEFAULT,supplement=True)
+        self.assertEqual(result['events'][-1]['reason'],'ETF_STOP')
+        self.assertEqual(result['events'][-1]['reference_price'],9800)
+        self.assertEqual(result['events'][-1]['time'],'2026-11-16T12:48:00+09:00')
+        self.assertEqual(result['buy_count'],1)
+
+    def test_existing_recorded_minute_has_precedence_over_downloaded_open(self):
+        self.seed_tail_prices()
+        from wall_replay import supplement_recorded,load_sources
+        source=supplement_recorded(self.path,'2026-11-16',load_sources(self.path,'2026-11-16','recorded'),DEFAULT)
+        at=self.start+timedelta(minutes=3)
+        rows=[f for f in source['frames'] if f['at'][:16]==at.isoformat()[:16]]
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['quote']['price'],10000)
+        added=[f for f in source['frames'] if f.get('price_supplement')]
+        self.assertTrue(all(not f['oi'] and not f['etf']['flow'] for f in added))

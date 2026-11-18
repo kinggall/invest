@@ -1,4 +1,4 @@
-"""Offline OI-strategy replay. Never fetches data, submits orders or edits source ledgers."""
+"""Offline OI-strategy replay with optional cached ETF price supplementation; never orders or source writes."""
 from collections import Counter
 from datetime import datetime,timedelta
 import json
@@ -107,7 +107,30 @@ def minute_frames(source,cfg):
         known.append(row)
 
 
-def replay(database,date,cfg,capital=10000000,mode='auto',progress=None,options=None):
+def supplement_recorded(database,date,source,cfg):
+    """Fill missing observed minutes with ETF OPENs; do not fabricate OI/flow."""
+    db=source_connection(database)
+    try:
+        names=tables(db)
+        if 'minutes' not in names:return source
+        rows=[json.loads(r[0]) for r in db.execute('SELECT value FROM minutes WHERE symbol=? AND substr(stamp,1,10)=? ORDER BY stamp',(TRADE_SYMBOL,date))]
+        prior=[json.loads(r[0]) for r in db.execute('SELECT value FROM (SELECT stamp,value FROM minutes WHERE symbol=? AND stamp<? ORDER BY stamp DESC LIMIT 3000) ORDER BY stamp',(TRADE_SYMBOL,date))]
+    finally:db.close()
+    if not rows:return source
+    # Preserve every original input. Only uncovered minute buckets get a price sample.
+    covered={frame['at'][:16] for frame in source['frames']}
+    extras=[]
+    for frame in minute_frames(dict(prior=prior,current=rows,oi=[],flows=[]),cfg):
+        if frame['at'][:16] in covered:continue
+        frame['price_supplement']=True
+        # The current OPEN is known at this timestamp; no future high/low/close.
+        frame['etf']['price_time']=frame['at']
+        extras.append(frame)
+    return dict(source,mode='hybrid',frames=sorted(source['frames']+extras,key=lambda f:f['at']),
+                supplemented_samples=len(extras),recorded_samples=len(source['frames']))
+
+
+def replay(database,date,cfg,capital=10000000,mode='auto',progress=None,options=None,supplement=False):
     progress=progress or (lambda message:None)
     try:parsed=datetime.strptime(date,'%Y-%m-%d').date()
     except (ValueError,TypeError):raise TradingError('백테스트 날짜는 YYYY-MM-DD 형식으로 선택하세요.') from None
@@ -117,7 +140,8 @@ def replay(database,date,cfg,capital=10000000,mode='auto',progress=None,options=
     selected=strategy_options(options)
     progress('저장된 OI·수급·ETF 자료를 읽는 중…')
     source=load_sources(database,date,mode)
-    frames=list(source['frames'] if source['mode']=='recorded' else minute_frames(source,cfg))
+    if supplement and source['mode']=='recorded':source=supplement_recorded(database,date,source,cfg)
+    frames=list(source['frames'] if source['mode'] in ('recorded','hybrid') else minute_frames(source,cfg))
     result=evaluate_frames(source,frames,parsed,capital,selected,progress)
     baseline=result if selected==strategy_options() else evaluate_frames(source,frames,parsed,capital,strategy_options(),progress)
     fields=('net_pnl','return_pct','buy_count','sell_count','max_drawdown_pct','fees','ending_quantity','ready_samples','samples')
@@ -157,7 +181,8 @@ def evaluate_frames(source,frames,parsed,capital,options,progress):
             key=event['id'].rsplit(':',1)[0];trade=trades.setdefault(key,dict(quantity=0,pnl=0))
             trade['quantity']+=event['quantity']*(1 if event['side']=='buy' else -1);trade['pnl']+=event['realized']
         completed=[t for t in trades.values() if t['quantity']==0]
-        if source['mode']=='minute':warnings.append('1분 시가 가정의 근사 백테스트입니다. 실제 REST 현재가·10초 감시·봉중 급락/손절·원분봉의 당시 저장 시점을 재현하지 못합니다.')
+        if source['mode']=='hybrid':warnings.append('저장 관측 입력을 유지하고 비어 있는 분만 한투 ETF 1분 시가로 보충했습니다. 보충 구간은 ETF 손절·평가·15:15 청산을 근사하며, 당시 OI·현물 지수·수급이 없어 신규/추가매수와 지수 기준 익절·손절은 재현하지 않습니다. 봉중 급락/실제 체결은 재현하지 못합니다.')
+        elif source['mode']=='minute':warnings.append('1분 시가 가정의 근사 백테스트입니다. 실제 REST 현재가·10초 감시·봉중 급락/손절·원분봉의 당시 저장 시점을 재현하지 못합니다.')
         else:warnings.append('저장 관측 입력만 시간순 재생합니다. 입력 기록 전/앱 중지 구간은 재현하지 않으며 당시 저장 지표를 사용합니다. 현재 MACD 기간 변경을 소급 계산하지 않습니다.')
         if source['mode']=='minute':
             recomputed=sum(s.get('replay_wall_selection')=='recomputed_from_past_distribution' for s in source['oi'])
@@ -166,7 +191,7 @@ def evaluate_frames(source,frames,parsed,capital,options,progress):
         if not ready:warnings.append('진입 판단에 필요한 자료가 동시에 충족된 표본이 없습니다. 거래 0건은 전략 성과의 증거가 아닙니다.')
         if result['quantity']:warnings.append('마지막 표본에도 미청산 보유가 있습니다. 마지막 관측 가격으로 평가했으며 임의로 장 마감 청산하지 않았습니다.')
         if first[11:16]>'09:00' or last[11:16]<'15:15':warnings.append('전 거래시간을 포함하지 않는 기록입니다. 표시된 첫/마지막 표본 구간만 평가했습니다.')
-        return dict(date=date,mode=source['mode'],symbol=TRADE_SYMBOL,capital=capital,first=first,last=last,samples=len(curve),ready_samples=ready,status_counts=dict(counts),
+        return dict(date=date,mode=source['mode'],supplemented_samples=source.get('supplemented_samples',0),recorded_samples=source.get('recorded_samples',len(frames) if source['mode']=='recorded' else 0),symbol=TRADE_SYMBOL,capital=capital,first=first,last=last,samples=len(curve),ready_samples=ready,status_counts=dict(counts),
             final_equity=result['equity'],net_pnl=result['net_pnl'],return_pct=result['net_pnl']/capital*100,realized=result['state']['realized'],unrealized=result['unrealized'],fees=result['state']['fees'],
             valuation_at=result['state'].get('mark_at'),oi_first=min(oi_times) if oi_times else None,oi_last=max(oi_times) if oi_times else None,flow_first=min(flow_times) if flow_times else None,flow_last=max(flow_times) if flow_times else None,ready_first=ready_first,ready_last=ready_last,
             ending_quantity=result['quantity'],position=result['state']['position'],max_drawdown_pct=drawdown,round_trips=len(completed),win_rate_pct=sum(t['pnl']>0 for t in completed)/len(completed)*100 if completed else None,
