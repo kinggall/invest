@@ -260,3 +260,15 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(event['fee_bps'],1.46527)
         self.assertEqual(event['fee'],round(event['quantity']*10020*0.000146527,2))
         self.assertAlmostEqual(view['state']['cash'],10000000-event['quantity']*10020-event['fee'])
+
+    def test_error_diagnostics_persist_and_balance_mismatch_is_visible(self):
+        self.enter();self.fill();self.client.holdings=0
+        with self.assertRaisesRegex(TradingError,'BALANCE_MISMATCH'):self.book.check_balance()
+        self.assertEqual(self.book.view()['account_balance']['quantity'],0)
+        self.assertGreater(self.book.view()['quantity'],0)
+        self.book.record_error('당일 청산','SHARED_DEMO_TOKEN_UNAVAILABLE',self.start)
+        other=WallBroker(self.path)
+        try:
+            error=other.view()['last_error']
+            self.assertEqual(error['stage'],'당일 청산');self.assertEqual(error['message'],'SHARED_DEMO_TOKEN_UNAVAILABLE')
+        finally:other.close()

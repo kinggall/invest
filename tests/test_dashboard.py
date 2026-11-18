@@ -382,4 +382,34 @@ class DashboardTests(unittest.TestCase):
             clock.now.return_value=datetime(2026,11,18,15,20,tzinfo=KST)
             self.assertFalse(self.app.demo_submission_allowed())
 
+    def test_close_deadline_warning_keeps_actual_error_visible(self):
+        from datetime import datetime
+        from trader import KST
+        broker=Mock();broker.view.return_value=dict(quantity=25,pending_count=0,state=dict(status='CLOSE_FAILED'))
+        self.app.wall_enabled=True;self.app.wall_message='SHARED_DEMO_TOKEN_UNAVAILABLE · 모의체결 조회 보류'
+        with patch.object(d,'WallBroker',return_value=broker),patch.object(d,'datetime') as clock:
+            clock.now.return_value=datetime(2026,11,18,18,0,tzinfo=KST)
+            result=self.app.wall_status()
+        self.assertIn('SHARED_DEMO_TOKEN_UNAVAILABLE',result['message'])
+        self.assertFalse(result['order_window_open'])
+
+    def test_manual_account_sync_is_read_only_even_when_stopped(self):
+        broker=Mock();broker.check_balance.return_value=dict(quantity=25)
+        broker.view.return_value=dict(quantity=25,pending_count=0)
+        client=Mock()
+        with patch.object(d,'WallBroker',return_value=broker),patch.object(self.app,'client',return_value=client):
+            self.app.run_account_sync()
+        broker.sync.assert_called_once_with();broker.step.assert_not_called()
+        client.order.assert_not_called();client.cancel.assert_not_called()
+        self.assertEqual(self.app.account_job['state'],'succeeded')
+        self.assertIn('25주',self.app.account_job['message'])
+
+    def test_out_of_session_close_request_explains_why_it_cannot_submit(self):
+        from datetime import datetime
+        from trader import KST
+        with patch.object(d,'datetime') as clock:
+            clock.now.return_value=datetime(2026,11,18,18,0,tzinfo=KST)
+            with self.assertRaisesRegex(TradingError,'실행시간'):self.app.action('wall_close',{})
+        self.assertFalse(self.app.wall_exit_requested)
+
 if __name__=='__main__':unittest.main()

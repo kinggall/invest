@@ -55,7 +55,13 @@ class WallBroker(WallPaper):
         result['pending_count']=len(self.pending())
         row=self.db.execute("SELECT payload FROM broker_settings WHERE id='balance'").fetchone()
         result['account_balance']=json.loads(row[0]) if row else None
+        error=self.db.execute("SELECT payload FROM broker_settings WHERE id='last_error'").fetchone()
+        result['last_error']=json.loads(error[0]) if error else None
         return result
+
+    def record_error(self,stage,message,now=None):
+        value=dict(stage=stage,message=str(message)[:1200],at=(now or datetime.now(KST)).isoformat())
+        self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('last_error',?)",(json.dumps(value,ensure_ascii=False),))
 
     def reset(self,capital):
         if self.pending():raise TradingError('미체결/접수 확인 필요 주문이 있어 전략 예산을 초기화할 수 없습니다.')
@@ -63,9 +69,9 @@ class WallBroker(WallPaper):
 
     def check_balance(self):
         value=self.client.balance(TRADE_SYMBOL)
+        self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('balance',?)",(json.dumps(value),))
         if value['quantity']<quantity(self.load()['position']):
             raise TradingError('DEMO_BALANCE_MISMATCH: 전략 보유보다 한투 잔고가 적습니다. 수동 거래/계좌 초기화를 확인하세요.')
-        self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('balance',?)",(json.dumps(value),))
         return value
 
     def start_check(self):

@@ -59,6 +59,8 @@ class Dashboard:
         self.replay_job=dict(state='idle',message='저장 자료가 있는 거래일을 선택하세요.')
         self.replay_thread=None
         self.replay_dates=[]
+        self.account_job=dict(state='idle',message='모의계좌 주문·잔고를 읽기 전용으로 다시 확인할 수 있습니다.')
+        self.account_thread=None
         self.wall_enabled=False
         self.day_exit_armed=False
         self.wall_exit_requested=False
@@ -128,10 +130,13 @@ class Dashboard:
         paper=WallBroker(self.state)
         try:
             result=paper.view();now=datetime.now(KST);message=self.wall_message
+            open_window=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
             if (self.wall_enabled or self.wall_exit_requested or self.day_exit_armed) and now.weekday()<5 and (now.hour,now.minute)>=(15,19) and (result['quantity'] or result['pending_count']):
                 result['state']['status']='CLOSE_DELAYED' if (now.hour,now.minute)<(15,20) else 'CLOSE_FAILED'
-                message='15:19 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 즉시 확인하세요'
-            return dict(result,enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=message)
+                message='15:19 청산 기한 초과 · 한투 모의계좌의 잔여 보유/주문을 확인하세요 / '+self.wall_message
+            if source_fingerprint()!=self.source_fingerprint:
+                message+=' / 서버 코드가 갱신됐습니다. Ctrl+C로 종료 후 재시작해야 합니다.'
+            return dict(result,order_window_open=open_window,account_job=dict(self.account_job),enabled=self.wall_enabled,day_exit_armed=self.day_exit_armed,exit_requested=self.wall_exit_requested,retry_after_seconds=max(0,int(self.retry_after-time.monotonic()+.999)),message=message)
         finally:paper.close()
 
     def wall_tick(self,snapshot,client):
@@ -387,7 +392,12 @@ class Dashboard:
 
     def action(self, command, value):
         with self.lock:
-            if command in ('oi_refresh','oi_start'):
+            if command=='wall_sync':
+                if self.account_job['state']=='running':raise TradingError('모의계좌 조회가 진행 중입니다.')
+                self.account_job=dict(state='running',message='한투 모의주문·잔고를 조회 중입니다. 주문은 전송하지 않습니다.')
+                self.account_thread=threading.Thread(target=self.run_account_sync,daemon=True)
+                self.account_thread.start()
+            elif command in ('oi_refresh','oi_start'):
                 self.request_oi(value,command=='oi_start')
             elif command=='future_refresh':
                 self.request_future()
@@ -422,6 +432,9 @@ class Dashboard:
                 finally:paper.close()
                 self.wall_message='전략 예산 설정됨 · 모의계좌 입금/초기화가 아닌 전략 한도입니다'
             elif command=='wall_close':
+                now=datetime.now(KST)
+                if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,20):
+                    raise TradingError('지금은 모의주문 실행시간(평일 09:00~15:20)이 아닙니다. 주문·잔고 다시 조회로 상태를 확인하세요.')
                 if self.enabled or self.risk_active:raise TradingError('기존 MACD 모의주문을 먼저 중지하세요.')
                 self.wall_exit_requested=True;self.last_refresh=0
                 self.wall_message='모의 전량청산 요청 · 미체결 확인 후 다음 유효 장중 시세에 주문'
@@ -454,6 +467,31 @@ class Dashboard:
             else:
                 raise TradingError('알 수 없는 요청')
 
+    def record_demo_error(self,stage,exc):
+        message=self.lookup_error(exc)
+        try:
+            broker=WallBroker(self.state)
+            try:broker.record_error(stage,message)
+            finally:broker.close()
+        except Exception:pass # Preserve the original failure even if diagnostics cannot be saved.
+        return message
+
+    def run_account_sync(self):
+        broker=None
+        try:
+            with self.io_lock:
+                broker=WallBroker(self.state,self.client())
+                broker.sync() # GET-only: no cancellation or new order.
+                balance=broker.check_balance()
+                view=broker.view()
+                message='한투 모의계좌 조회 완료 · 계좌 보유 '+str(balance['quantity'])+'주 / 전략 장부 '+str(view['quantity'])+'주 / 미확인 주문 '+str(view['pending_count'])+'건'
+                with self.lock:self.account_job=dict(state='succeeded',message=message)
+        except Exception as exc:
+            message=self.record_demo_error('수동 주문·잔고 조회',exc)
+            with self.lock:self.account_job=dict(state='failed',message=message)
+        finally:
+            if broker is not None:broker.close()
+
     def demo_submission_allowed(self):
         now=datetime.now(KST)
         return ((self.wall_enabled or self.wall_exit_requested or (self.day_exit_armed and (now.hour,now.minute)>=(15,15))) and now.weekday()<5
@@ -484,7 +522,8 @@ class Dashboard:
             if self.io_lock.acquire(blocking=False):
                 try:self.sync_demo()
                 except Exception as exc:
-                    with self.lock:self.wall_message=self.lookup_error(exc)+' · 모의체결 조회 보류'
+                    message=self.record_demo_error('모의체결 조회·당일 청산',exc)
+                    with self.lock:self.wall_message=message+' · 모의체결 조회 보류'
                 finally:self.io_lock.release()
             with self.lock:
                 execute=self.enabled
@@ -496,12 +535,13 @@ class Dashboard:
             try:
                 self.tick(execute)
             except Exception as exc:
+                message=self.record_demo_error('전략 평가·모의주문',exc)
                 with self.lock:
                     self.last_refresh=time.monotonic()
                     if is_rate_limit(exc):self.retry_after=time.monotonic()+30
                     self.enabled=False
                     self.last_message=self.lookup_error(exc)+' · 자동 실행 중지'
-                    if self.wall_enabled or self.wall_exit_requested:self.wall_message=self.lookup_error(exc)+' · 모의주문/체결 확인 보류, 다음 조회 재시도'
+                    if self.wall_enabled or self.wall_exit_requested:self.wall_message=message+' · 모의주문/체결 확인 보류, 다음 조회 재시도'
             finally:
                 self.io_lock.release()
 
