@@ -67,6 +67,11 @@ if ($Diagnose) {
     python (Join-Path $PSScriptRoot 'trader.py') --domino-home $DominoHome diagnose
     exit $LASTEXITCODE
 }
+try {
+    & (Join-Path $PSScriptRoot 'schedule-price-archive.ps1') -DominoHome $DominoHome
+} catch {
+    Write-Warning ('ETF archive schedule registration failed: ' + $_.Exception.Message + ' Dashboard background collection will still run while open.')
+}
 Write-Host 'Opening the invest demo dashboard at http://127.0.0.1:8766'
 Write-Host 'KIS DEMO orders are sent only after Start. No real orders or token issuance. Restart begins stopped.'
 python (Join-Path $PSScriptRoot 'dashboard.py') --domino-home $DominoHome --state (Join-Path $PSScriptRoot 'runtime\orders.sqlite3')

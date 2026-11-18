@@ -24,6 +24,7 @@ from wall_broker import WallBroker
 from wall_replay import replay, available_dates, ensure_observations, capture
 from signals import macd
 from history import History
+from price_archive import archive, latest as archive_latest
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
 
@@ -34,7 +35,7 @@ API_VERSION = '2026-11-demo2'
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py','price_archive.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -192,7 +193,7 @@ class Dashboard:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
             orders=[];signals=[] # Historical broker ledger is retained, not part of this page.
-            return dict(replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(price_archive=archive_latest(self.state),replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -600,6 +601,15 @@ class Dashboard:
                     self.wall_message=message+' · 보호 감시 재시도 대기'
                     self.protection_health.update(state='ERROR',error=message,last_attempt=datetime.now(KST).isoformat())
 
+    def archive_worker(self):
+        # Independent of trading start/stop and indicator locks. The shared lock
+        # and persisted check times also coordinate the Windows scheduled task.
+        while not self.shutdown.is_set():
+            try:archive(self.state,self.home)
+            except (OSError,TradingError):pass # A concurrent archive owns the lock.
+            except Exception as exc:self.record_demo_error('자동 ETF 분봉 저장',exc)
+            if self.shutdown.wait(60):break
+
     def worker(self):
         while not self.shutdown.wait(10):
             with self.lock:
@@ -684,6 +694,7 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(app))
     threading.Thread(target=app.worker, daemon=True).start()
     threading.Thread(target=app.protection_worker, daemon=True).start()
+    threading.Thread(target=app.archive_worker, daemon=True).start()
 
     threading.Thread(target=app.oi_worker, daemon=True).start()
     threading.Thread(target=app.future_worker, daemon=True).start()

@@ -13,13 +13,20 @@ class History:
         self.client=client or ReadOnlyHistoryClient(engine.client.tokens.home)
         self.db.execute('CREATE TABLE IF NOT EXISTS history_days (symbol TEXT,day TEXT,source TEXT,observed TEXT,PRIMARY KEY(symbol,day))')
 
-    def day(self, date):
+    def day(self, date, refresh=False, now=None):
+        now=now or datetime.now(KST)
         row=self.db.execute('SELECT source FROM history_days WHERE symbol=? AND day=?',(SYMBOL,date.isoformat())).fetchone()
-        if row:
+        if row and not refresh:
             self.progress(date.isoformat()+' · 저장된 과거 분봉 읽는 중…')
-            return [json.loads(r[0]) for r in self.db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',
+            cached=[json.loads(r[0]) for r in self.db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',
                 (SYMBOL,date.isoformat(),(date+timedelta(days=1)).isoformat()))]
+            start=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
+            required={(start+timedelta(minutes=i)).isoformat() for i in range(380)}
+            if required<={r['time'] for r in cached}:return cached
+            self.progress('저장 분봉 누락 발견 · 한투에서 다시 조회하는 중…')
         cursor=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=15,minute=30)
+        if date==now.date() and (now.hour,now.minute)<(15,31):
+            cursor=min(cursor,now.replace(second=0,microsecond=0)-timedelta(minutes=1))
         rows={}
         for page in range(5):
             self.progress(date.isoformat()+' · 과거 1분봉 '+str(page+1)+'/5페이지 조회 중…')
@@ -58,7 +65,8 @@ class History:
         try:
             for stamp,row in rows.items():
                 self.db.execute('INSERT OR REPLACE INTO minutes VALUES (?,?,?)',(SYMBOL,stamp.isoformat(),json.dumps(row)))
-            if rows:
+            complete_day=date<now.date() or date==now.date() and (now.hour,now.minute)>=(15,31)
+            if rows and complete_day:
                 self.db.execute('INSERT OR REPLACE INTO history_days VALUES (?,?,?,?)',
                     (SYMBOL,date.isoformat(),'KIS real historical GET',datetime.now(KST).isoformat()))
             self.db.execute('COMMIT')
