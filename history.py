@@ -14,7 +14,28 @@ class History:
         self.client=client or ReadOnlyHistoryClient(engine.client.tokens.home)
         self.db.execute('CREATE TABLE IF NOT EXISTS history_days (symbol TEXT,day TEXT,source TEXT,observed TEXT,PRIMARY KEY(symbol,day))')
 
-    def day(self, date, refresh=False, now=None):
+    def cached(self,date):
+        return [json.loads(r[0]) for r in self.db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',
+            (SYMBOL,date.isoformat(),(date+timedelta(days=1)).isoformat()))]
+
+    def save_minutes(self,rows):
+        self.db.execute('BEGIN IMMEDIATE')
+        try:
+            for row in rows:
+                self.db.execute('INSERT OR REPLACE INTO minutes VALUES (?,?,?)',(SYMBOL,row['time'],json.dumps(row)))
+            self.db.execute('COMMIT')
+        except Exception:self.db.execute('ROLLBACK');raise
+
+    def day(self,date,refresh=False,now=None):
+        self.last_api_success=False
+        try:return self.download_day(date,refresh,now)
+        except TradingError as exc:
+            cached=self.cached(date)
+            if not cached:raise
+            self.warnings.append(date.isoformat()+' 분봉 추가 조회 실패 · 받은 자료와 기존 저장 '+str(len(cached))+'분으로 계속: '+str(exc))
+            return cached
+
+    def download_day(self, date, refresh=False, now=None):
         now=now or datetime.now(KST)
         row=self.db.execute('SELECT source FROM history_days WHERE symbol=? AND day=?',(SYMBOL,date.isoformat())).fetchone()
         if row and not refresh:
@@ -67,6 +88,7 @@ class History:
                     raise TradingError('HISTORY_INVALID_OHLC')
                 if stamp in rows and rows[stamp]!=row:raise TradingError('HISTORY_CONFLICT')
                 rows[stamp]=row
+            self.save_minutes(rows.values())
             if oldest is None or oldest.hour==9 and oldest.minute==0:
                 break
             following=oldest-timedelta(minutes=1)
@@ -75,7 +97,10 @@ class History:
             if cursor.hour<9:break
         else:
             raise TradingError('HISTORY_PAGINATION_LIMIT')
-        # Only cache completed retrievals, not a half-downloaded session.
+        self.last_api_success=True
+        # Pages are durable even when a later page fails. Mark a complete day only
+        # when this retrieval finished and all expected regular-session minutes exist.
+        merged=self.cached(date)
         self.db.execute('BEGIN IMMEDIATE')
         try:
             for stamp,row in rows.items():
@@ -83,13 +108,13 @@ class History:
             complete_day=date<now.date() or date==now.date() and (now.hour,now.minute)>=(15,31)
             start=datetime.combine(date,datetime.min.time(),tzinfo=KST).replace(hour=9)
             complete_minutes={(start+timedelta(minutes=i)) for i in range(380)}
-            if rows and complete_day and complete_minutes<=set(rows):
+            if merged and complete_day and {d.isoformat() for d in complete_minutes}<={r['time'] for r in merged}:
                 self.db.execute('INSERT OR REPLACE INTO history_days VALUES (?,?,?,?)',
                     (SYMBOL,date.isoformat(),'KIS real historical GET',datetime.now(KST).isoformat()))
             self.db.execute('COMMIT')
         except Exception:
             self.db.execute('ROLLBACK');raise
-        return [rows[stamp] for stamp in sorted(rows)]
+        return merged
 
     def load(self, cutoff, config, now=None):
         now=now or datetime.now(KST)

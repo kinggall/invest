@@ -16,11 +16,13 @@ if ($existing.Count -and ($existing[0].Description -ne $description -or @($exist
 }
 $userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute $python -Argument $arguments -WorkingDirectory $PSScriptRoot
-# Daily trigger repetition is configured explicitly for Windows PowerShell 5.1.
-$intraday = New-ScheduledTaskTrigger -Daily -At '09:05'
-$intraday.Repetition.Interval = 'PT15M'
-$intraday.Repetition.Duration = 'PT6H25M'
-$triggers = @($intraday, (New-ScheduledTaskTrigger -Daily -At '15:35'), (New-ScheduledTaskTrigger -Daily -At '15:50'), (New-ScheduledTaskTrigger -Daily -At '16:10'), (New-ScheduledTaskTrigger -AtLogOn -User $userId))
+# Explicit daily triggers avoid the null Repetition object on Windows PS 5.1.
+# 26 intraday + 3 closing + 1 logon triggers stay below Task Scheduler's limit.
+$triggers = @(for ($slot = 0; $slot -lt 26; $slot++) {
+    $at = (Get-Date).Date.AddHours(9).AddMinutes(5 + 15 * $slot)
+    New-ScheduledTaskTrigger -Daily -At $at
+})
+$triggers += @((New-ScheduledTaskTrigger -Daily -At '15:35'), (New-ScheduledTaskTrigger -Daily -At '15:50'), (New-ScheduledTaskTrigger -Daily -At '16:10'), (New-ScheduledTaskTrigger -AtLogOn -User $userId))
 $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -RestartCount 2 -RestartInterval (New-TimeSpan -Minutes 15)
 Register-ScheduledTask -TaskName $name -TaskPath '\' -Description $description -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Force | Out-Null

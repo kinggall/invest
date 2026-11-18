@@ -1,6 +1,7 @@
 from datetime import datetime,timedelta
 import hashlib
 import json
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -116,5 +117,48 @@ class HistoryTests(unittest.TestCase):
         for path,tr,post in [(INTRADAY_HISTORY_PATH,'FHKST03010200',True),(INTRADAY_HISTORY_PATH,'wrong',False),('/oauth2/tokenP',None,False),(None,None,False)]:
             with self.assertRaisesRegex(TradingError,'READ_ONLY_HISTORY_ROUTE_BLOCKED'):
                 client.request(path,tr,{},post=post)
+
+
+
+    def test_rejected_1019_page_keeps_downloaded_afternoon_and_merges_local_morning(self):
+        from trader import INTRADAY_HISTORY_PATH
+        date=datetime(2026,11,18,18,tzinfo=KST)
+        start=date.replace(hour=9,minute=0)
+        for i in range(228):
+            stamp=start+timedelta(minutes=i);price=15000+i
+            row=dict(time=stamp.isoformat(),open=price,high=price+5,low=price-5,close=price,volume=100)
+            self.engine.db.execute('INSERT OR REPLACE INTO minutes VALUES (?,?,?)',(SYMBOL,row['time'],json.dumps(row)))
+        self.engine.db.commit()
+        original=self.source.request;requests=[]
+        def request(path,tr,params,post=False):
+            requests.append((path,params['FID_INPUT_HOUR_1']))
+            if params['FID_INPUT_HOUR_1']<='101900':raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+            query=dict(params,FID_INPUT_DATE_1='20261118')
+            result=original(HISTORY_PATH,'FHKST03010230',query)
+            result['output2']=[row for row in result['output2'] if row['stck_cntg_hour']>='102000']
+            return result
+        self.source.request=request
+        rows=self.history.day(date.date(),now=date)
+        self.assertEqual(len(rows),390)
+        self.assertEqual(rows[0]['time'][11:16],'09:00')
+        self.assertEqual(rows[-1]['time'][11:16],'15:29')
+        self.assertIn((INTRADAY_HISTORY_PATH,'101900'),requests)
+        self.assertTrue(any('추가 조회 실패' in w for w in self.history.warnings))
+        self.assertFalse(self.history.last_api_success)
+        # Closing the connection must not discard the afternoon checkpoints.
+        import sqlite3
+        check=sqlite3.connect(self.home/'state.db')
+        self.assertTrue(check.execute("SELECT 1 FROM minutes WHERE stamp='2026-11-18T15:19:00+09:00'").fetchone());check.close()
+
+    def test_first_page_rejection_uses_existing_partial_prices_with_warning(self):
+        date=datetime(2026,11,18,18,tzinfo=KST)
+        row=dict(time='2026-11-18T12:30:00+09:00',open=100,high=100,low=100,close=100,volume=1)
+        self.engine.db.execute('INSERT INTO minutes VALUES (?,?,?)',(SYMBOL,row['time'],json.dumps(row)));self.engine.db.commit()
+        def request(*args,**kwargs):raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+        self.source.request=request
+        rows=self.history.day(date.date(),now=date)
+        self.assertEqual(rows,[row])
+        self.assertTrue(self.history.warnings)
+        self.assertFalse(self.engine.db.execute('SELECT 1 FROM history_days').fetchone())
 
 if __name__=='__main__':unittest.main()

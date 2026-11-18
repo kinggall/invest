@@ -211,7 +211,11 @@ class ReadOnlyHistoryClient:
             raise TradingError('READ_ONLY_HISTORY_ROUTE_BLOCKED')
         data=read_only_get(self,REAL_BASE,path,tr_id,payload)
         if not isinstance(data,dict) or str(data.get('rt_cd'))!='0':
-            raise TradingError('HISTORY_QUERY_REJECTED / CODE='+safe_code(data))
+            message=data.get('msg1','') if isinstance(data,dict) else ''
+            # Keep Korean diagnostics only: no echoed ASCII credentials/account digits.
+            detail=re.sub(r'[^가-힣ㄱ-ㅎㅏ-ㅣ ]',' ',message)[:160] if isinstance(message,str) else ''
+            detail=' '.join(detail.split())
+            raise TradingError('HISTORY_QUERY_REJECTED / CODE='+safe_code(data)+(' / '+detail if detail else ''))
         return data
 
 

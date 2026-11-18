@@ -81,7 +81,9 @@ def archive(database,home,now=None,client=None,force=False):
                     try:
                         if reader is None:reader=History(SimpleNamespace(db=db),client=client or ReadOnlyHistoryClient(home))
                         reader.day(date,refresh=True,now=now)
-                        fetched=True
+                        fetched=reader.last_api_success
+                        record['warnings']=list(reader.warnings)
+                        if not fetched:record['error']=reader.warnings[-1] if reader.warnings else 'PRICE_ARCHIVE_PARTIAL_FETCH'
                     except Exception as exc:
                         # Only a controlled error type/code reaches the status page.
                         record.update(status='ERROR',error=str(exc) if isinstance(exc,TradingError) else 'PRICE_ARCHIVE_FETCH_FAILED')
