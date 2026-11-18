@@ -13,14 +13,14 @@ RULES=dict(touch_pct=.3,put_stop_pct=.3,etf_stop_pct=1,initial_pct=40,below_vwap
     target1_box_pct=60,target2_box_pct=80,sell_each_pct=30,breakout_failure_pct=.2,cooldown_minutes=15,max_put_stops=2,
     fee_bps=ETF_FEE_BPS,slippage_bps=5,tax_bps=0,force_close='15:15',fill_model='신호 확정 후 수집한 ETF REST 현재가 · 불리한 5원 호가/수수료/슬리피지 · 호가 잔량/미체결 미재현')
 
-DEFAULT_OPTIONS=dict(macd_filter=True,vwap_sizing=True,rebound_bars=1,breakout_add=True)
+DEFAULT_OPTIONS=dict(macd_filter=True,vwap_sizing=True,rebound_bars=1,breakout_add=True,etf_profit_take=False)
 
 
 def strategy_options(value=None):
     if value is None:return dict(DEFAULT_OPTIONS)
     if not isinstance(value,dict) or set(value)-set(DEFAULT_OPTIONS):raise TradingError('BACKTEST_OPTIONS_INVALID')
     result=dict(DEFAULT_OPTIONS,**value)
-    for name in ('macd_filter','vwap_sizing','breakout_add'):
+    for name in ('macd_filter','vwap_sizing','breakout_add','etf_profit_take'):
         if not isinstance(result[name],bool):raise TradingError('BACKTEST_OPTION_'+name.upper())
     if type(result['rebound_bars']) is not int or result['rebound_bars'] not in (1,2,3):raise TradingError('BACKTEST_REBOUND_BARS_INVALID')
     return result
@@ -80,7 +80,7 @@ class WallPaper:
             if q*price+fee>state['cash']+.001:raise TradingError('PAPER_CASH_LIMIT')
             state['cash']=round(state['cash']-q*price-fee,2)
             p['lots'].append(dict(kind='add' if reason=='BREAKOUT_ADD' else 'base',quantity=q,price=price,buy_fee_per_share=fee/q))
-            p['stop_price']=max(p.get('stop_price',0),average(p)*.99)
+            p['stop_price']=max(p.get('stop_price',0),average(p)*(1 if self.options['etf_profit_take'] and p.get('etf_profit_taken') else .99))
             realized=0
         else:
             remaining=q;cost=0
@@ -146,6 +146,18 @@ class WallPaper:
                 self.event(s,p,'BREAKOUT_FAIL','sell',add_qty,price,spot,now,confirmation)
                 s['cooldown_until']=(now+timedelta(minutes=15)).isoformat()
                 return wait('ADD_EXITED','돌파 실패 · 추가매수분만 가상 청산, 최초 보유 잔여분 유지')
+            if self.options['etf_profit_take'] and not p.get('etf_profit_taken') and price>=average(p)*1.01:
+                # First scale-out is capped at a cumulative 50% of the original
+                # entry, including any earlier index TP1. Never sell twice here.
+                target=max(1,math.floor(p['original_quantity']*.5))
+                sold=p['original_quantity']-sum(lot['quantity'] for lot in p['lots'] if lot['kind']=='base')
+                amount=min(quantity(p),max(0,target-sold))
+                confirmation['etf_profit_take']=dict(trigger_price=average(p)*1.01,trigger_pct=1,target_quantity=target,previously_sold=sold)
+                p['etf_profit_taken']=True;p['tp1']=True;p['protected']=True;p['stop_price']=max(p['stop_price'],average(p))
+                if amount:self.event(s,p,'ETF_PROFIT_1PCT','sell',amount,price,spot,now,confirmation)
+                if not quantity(p):s['position']=None;return wait('EXITED','ETF +1% 익절 · 가상 보유 청산 완료')
+                p['stop_price']=max(p['stop_price'],average(p))
+                return wait('PROFIT_LOCKED','ETF +1% · 최초 수량 누적 50% 익절 · 잔여 평단 보호')
             if spot is not None:
                 for number in (1,2):
                     flag='tp'+str(number)

@@ -206,3 +206,16 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(rows[0]['quote']['price'],10000)
         added=[f for f in source['frames'] if f.get('price_supplement')]
         self.assertTrue(all(not f['oi'] and not f['etf']['flow'] for f in added))
+
+
+    def test_etf_profit_take_compares_same_samples_and_preserves_source(self):
+        for offset,price in [(0,10000),(3,10000),(4,10120),(5,10000)]:
+            now=self.start+timedelta(minutes=offset);capture(self.book.db,*self.frame(now,price=price),now)
+        before=hashlib.sha256(self.path.read_bytes()).hexdigest()
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(etf_profit_take=True))
+        self.assertEqual(result['comparison'][0]['samples'],result['comparison'][1]['samples'])
+        self.assertEqual([e['reason'] for e in result['events']],['REBOUND_ENTRY','ETF_PROFIT_1PCT','PROFIT_PROTECT'])
+        self.assertGreater(result['comparison'][0]['ending_quantity'],0)
+        self.assertEqual(result['ending_quantity'],0)
+        self.assertFalse(self.book.options['etf_profit_take'])
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)
