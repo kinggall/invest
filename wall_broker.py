@@ -25,6 +25,8 @@ class WallBroker(WallPaper):
         self.may_submit=None
         self.db.execute('CREATE TABLE IF NOT EXISTS broker_meta (id TEXT PRIMARY KEY,payload TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS broker_settings (id TEXT PRIMARY KEY,payload TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS broker_trace (id INTEGER PRIMARY KEY,stamp TEXT,kind TEXT,payload TEXT)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS broker_trace_time ON broker_trace(stamp)')
         # Reuse the durable order ledger and the existing CLI reconciliation path.
         if client is not None:
             engine=Engine(self.source.with_name(self.source.stem+'.demo.sqlite3'),client)
@@ -59,8 +61,15 @@ class WallBroker(WallPaper):
         result['last_error']=json.loads(error[0]) if error else None
         return result
 
+    def trace(self,kind,now=None,**fields):
+        stamp=(now or datetime.now(KST)).isoformat()
+        fields['recorded_at']=datetime.now(KST).isoformat()
+        self.db.execute('INSERT INTO broker_trace(stamp,kind,payload) VALUES (?,?,?)',
+            (stamp,kind,json.dumps(fields,ensure_ascii=False)))
+
     def record_error(self,stage,message,now=None):
         value=dict(stage=stage,message=str(message)[:1200],at=(now or datetime.now(KST)).isoformat())
+        self.trace('ERROR',now,stage=stage,message=value['message'])
         self.db.execute("INSERT OR REPLACE INTO broker_settings VALUES ('last_error',?)",(json.dumps(value,ensure_ascii=False),))
 
     def reset(self,capital):
@@ -188,6 +197,7 @@ class WallBroker(WallPaper):
         if self.client is None:raise TradingError('DEMO_CLIENT_REQUIRED')
         now=now or datetime.now(KST)
         self.may_submit=may_submit
+        self.trace('EVALUATION_STARTED',now,quantity=quantity(self.load()['position']),force_exit=bool(force_exit),closing=(now.hour,now.minute)>=(15,15))
         self.sync(now,allow_cancel=(now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20) and (may_submit is None or may_submit())))
         regular=now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20)
         closing=now.weekday()<5 and (now.hour,now.minute)>=(15,15)
@@ -196,12 +206,13 @@ class WallBroker(WallPaper):
             state=self.load();unresolved=bool(quantity(state['position']) or pending)
             state.update(status='CLOSE_FAILED' if unresolved else 'CLOSED_FLAT',
                 message='당일 청산 미완료 · 잔여 보유/미확인 주문을 한투 모의계좌에서 즉시 확인하세요' if unresolved else '당일 청산 확인 완료 · 보유 0 / 미체결 0',updated_at=now.isoformat())
-            self.save(state);return self.view()
+            self.save(state);self.trace('BLOCKED',now,status=state['status'],message=state['message']);return self.view()
         if pending:
             blocked=closing and any(not row['order_no'] for row in pending)
             late=closing and (now.hour,now.minute)>=(15,19)
             state=self.load();state.update(status='CLOSE_BLOCKED' if blocked else 'CLOSE_DELAYED' if late else 'ORDER_PENDING',
                 message='당일 청산 차단 · 접수 불명 주문을 한투에서 즉시 확인하세요' if blocked else '15:19 청산 기한 초과 · 미체결 즉시 확인 · 잔여 청산 진행' if late else '당일 청산 진행 · 기존 주문 취소/체결 확인 중' if closing else '미체결/접수 확인 필요 주문 대기 · 새 주문 차단');self.save(state)
+            self.trace('BLOCKED',now,status=state['status'],message=state['message'])
             return self.view()
         self.db.execute('BEGIN IMMEDIATE')
         intent=None
@@ -219,9 +230,13 @@ class WallBroker(WallPaper):
                 else:state=self.advance(state,snapshot or {},oi or {},quote or {},now,force_exit)
             except Intent as signal:
                 intent=signal.value;state=intent['state']
+            if intent is not None:
+                self.trace('SIGNAL',now,side=intent['side'],reason=intent['reason'],quantity=intent['quantity'],reference=intent['reference'],position_id=intent['position']['id'])
+            else:self.trace('DECISION',now,status=state['status'],message=state['message'],quantity=quantity(state['position']))
             self.save(state);self.db.execute('COMMIT')
         except Exception:self.db.execute('ROLLBACK');raise
         if intent is None:return self.view()
+        self.trace('PREORDER_CHECK',now,side=intent['side'],reason=intent['reason'],quantity=intent['quantity'])
         balance=self.check_balance()
         amount=intent['quantity'];reference=intent['reference'];side=intent['side'];reason=intent['reason']
         protective=side=='sell' and reason in ('MANUAL_EXIT','OVERNIGHT_EXIT','DAY_EXIT','ETF_STOP','PUT_STOP','PROFIT_PROTECT','BREAKOUT_FAIL')
@@ -235,7 +250,7 @@ class WallBroker(WallPaper):
         elif amount>balance['quantity'] or amount>quantity(state['position']):
             raise TradingError('DEMO_SELL_QUANTITY_BLOCKED')
         if may_submit is not None and not may_submit():
-            state=self.load();state.update(status='STOPPED',message='사용자 중지 · 모의주문 전송 안 함');self.save(state);return self.view()
+            state=self.load();state.update(status='STOPPED',message='사용자 중지 · 모의주문 전송 안 함');self.save(state);self.trace('BLOCKED',now,status=state['status'],message=state['message']);return self.view()
         intent['quantity']=amount
         strategy_id=uuid.uuid4().hex
         strategy=dict(id=strategy_id,symbol=TRADE_SYMBOL,side=side,quantity=amount,limit_price=0 if protective else price,
@@ -248,11 +263,13 @@ class WallBroker(WallPaper):
             self.db.execute('INSERT INTO orders(run_id,scope,day,symbol,quantity,strategy,status,order_no,branch,filled) VALUES (?,?,?,?,?,?,?,?,?,0)',
                 (run_id,self.scope,now.strftime('%Y%m%d'),TRADE_SYMBOL,amount,json.dumps(strategy),'UNKNOWN','',''))
             self.db.execute('INSERT INTO broker_meta VALUES (?,?)',(run_id,json.dumps(intent)))
+            self.trace('ORDER_RESERVED',now,side=side,reason=reason,quantity=amount,strategy_id=strategy_id)
             self.db.execute('COMMIT')
         except Exception:self.db.execute('ROLLBACK');raise
         self.client.before_order=may_submit
         try:number,branch=self.client.order(strategy)
         except OrderNotSent:
+            self.trace('ORDER_NOT_SENT',side=side,reason=reason,quantity=amount,strategy_id=strategy_id)
             intent['settled']=True
             self.db.execute('BEGIN IMMEDIATE')
             try:
@@ -262,5 +279,6 @@ class WallBroker(WallPaper):
             except Exception:self.db.execute('ROLLBACK');raise
             raise
         self.db.execute("UPDATE orders SET status='SUBMITTED',order_no=?,branch=? WHERE run_id=?",(number,branch,run_id))
+        self.trace('ORDER_SUBMITTED',side=side,reason=reason,quantity=amount,order_no=number,strategy_id=strategy_id)
         state=self.load();state.update(status='SUBMITTED',message='한투 모의주문 접수 · 체결 확인 대기',updated_at=now.isoformat());self.save(state)
         return self.view()
