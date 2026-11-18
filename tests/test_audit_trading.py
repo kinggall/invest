@@ -90,3 +90,15 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(client.request.call_args.args[1],'FHKST03010230')
         self.assertFalse(client.order.called)
         for path,digest in before.items():self.assertEqual(hashlib.sha256(Path(path).read_bytes()).hexdigest(),digest)
+
+
+    def test_audit_includes_heartbeat_and_oi_failure_without_modifying_journal(self):
+        self.enter()
+        from monitoring import append
+        append(self.path,'HEARTBEAT',dict(oi_active=True),self.start)
+        append(self.path,'OI_ERROR',dict(message='OI_QUOTE_REJECTED'),self.start+timedelta(minutes=1))
+        before=hashlib.sha256(self.path.read_bytes()).hexdigest()
+        result=audit(self.path,'2026-11-16')
+        self.assertEqual(result['monitoring']['counts']['HEARTBEAT'],1)
+        self.assertEqual(result['monitoring']['errors'][0]['kind'],'OI_ERROR')
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)

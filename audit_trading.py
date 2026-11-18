@@ -53,6 +53,16 @@ def audit(database,day):
             db.execute('BEGIN');names=tables(db)
             if 'wall_observations' in names:
                 frames=[json.loads(r[0]) for r in db.execute('SELECT payload FROM wall_observations WHERE stamp>=? AND stamp<? ORDER BY stamp',(lower,upper))]
+            if 'watch_events' in names:
+                watch=[dict(at=r[0],kind=r[1],details=json.loads(r[2])) for r in db.execute('SELECT stamp,kind,payload FROM watch_events WHERE stamp>=? AND stamp<? ORDER BY id',(lower,upper))]
+                report['monitoring']=dict(count=len(watch),first=watch[0]['at'] if watch else None,last=watch[-1]['at'] if watch else None,
+                    counts=dict(Counter(r['kind'] for r in watch)),errors=[r for r in watch if r['kind'] in ('ERROR','OI_ERROR')][-200:],recent=watch[-100:])
+            if 'oi_snapshots' in names:
+                snapshots=[json.loads(r[0]) for r in db.execute('SELECT payload FROM oi_snapshots WHERE observed_at>=? AND observed_at<? ORDER BY id',(lower,upper))]
+                report['oi_history']=[dict(at=s.get('observed_at'),expiry=s.get('expiry'),put_wall=s.get('put_wall'),call_wall=s.get('call_wall'),spot=s.get('spot'),coverage_complete=s.get('coverage_complete'),sampling=s.get('sampling')) for s in snapshots]
+            if 'oi_quotes' in names:
+                r=db.execute('SELECT count(*),min(stamp),max(stamp) FROM oi_quotes WHERE stamp>=? AND stamp<?',(lower,upper)).fetchone()
+                report['oi_quote_coverage']=dict(count=r[0],first=r[1],last=r[2])
             if 'minutes' in names:
                 minutes=[json.loads(r[0]) for r in db.execute('SELECT value FROM minutes WHERE symbol=? AND stamp>=? AND stamp<? ORDER BY stamp',(TRADE_SYMBOL,lower,upper))]
         finally:db.close()

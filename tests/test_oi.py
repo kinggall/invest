@@ -350,3 +350,23 @@ class OITests(unittest.TestCase):
             with self.assertRaises(TradingError):client.request(OI_OPTIONS,'FHPIF05030100',{},True)
         self.assertEqual(len(calls),3);self.assertEqual(path.read_bytes(),before)
         with self.assertRaises(TradingError):transport(OI_OPTIONS,{}, {},True,base=REAL_BASE)
+
+
+    def test_interrupted_full_pass_keeps_individual_quotes_durable(self):
+        import sqlite3
+        master=self.configure_incremental();original=self.quotes.request;count=[0]
+        def interrupted(path,tr,params,post=False):
+            if path==OI_PRICE:
+                count[0]+=1
+                if count[0]>3:raise RuntimeError('simulated worker crash')
+            return original(path,tr,params,post)
+        self.quotes.request=interrupted
+        with patch('oi.load_index_master',return_value=master):
+            with self.assertRaisesRegex(RuntimeError,'worker crash'):self.collect()
+        db=sqlite3.connect(self.root/'state.db')
+        try:
+            self.assertEqual(db.execute('SELECT count(*) FROM oi_quotes').fetchone()[0],3)
+            self.assertEqual(db.execute('SELECT count(*) FROM oi_snapshots').fetchone()[0],0)
+            sample=json.loads(db.execute('SELECT payload FROM oi_quotes LIMIT 1').fetchone()[0])
+            self.assertGreater(sample['oi'],0);self.assertTrue(sample['received_at'])
+        finally:db.close()

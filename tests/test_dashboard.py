@@ -355,14 +355,14 @@ class DashboardTests(unittest.TestCase):
             value=json.loads(db.execute('SELECT value FROM settings WHERE id=3').fetchone()[0])
         self.assertEqual(value,{'expiry':'','radius_pct':5})
 
-    def test_oi_error_stops_only_observer_not_trading_or_protection(self):
+    def test_oi_error_keeps_recording_requested_without_stopping_trading_or_protection(self):
         self.app.enabled=True;self.app.risk_active=True
         with patch.object(d,'OIService') as provider:
             provider.return_value.collect.side_effect=TradingError('OI_QUOTE_REJECTED')
             self.app.action('oi_start',{'expiry':'','radius_pct':5})
             self.app.oi_thread.join(2)
         self.assertEqual(self.app.oi_job['state'],'failed')
-        self.assertFalse(self.app.oi_active)
+        self.assertTrue(self.app.oi_active)
         self.assertTrue(self.app.enabled);self.assertTrue(self.app.risk_active)
 
     def test_day_close_sweep_does_not_need_indicator_or_quote_workers(self):
@@ -455,5 +455,35 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.app.replay_job['state'],'succeeded')
         self.assertEqual(self.app.replay_result['chart'],loaded['chart'])
         self.assertEqual(self.app.wall_status()['state'],baseline)
+
+
+
+    def test_oi_recording_resumes_after_restart_without_arming_orders(self):
+        self.app.oi_active=True;self.app.save_recording_flag()
+        restarted=d.Dashboard(self.app.home,self.app.state)
+        self.assertTrue(restarted.oi_active)
+        self.assertFalse(restarted.wall_enabled);self.assertFalse(restarted.day_exit_armed)
+        self.app.action('oi_stop',{})
+        stopped=d.Dashboard(self.app.home,self.app.state)
+        self.assertFalse(stopped.oi_active)
+
+    def test_failed_monitor_write_is_visible_and_does_not_raise_in_exit_path(self):
+        import sqlite3
+        with patch.object(d,'watch_append',side_effect=sqlite3.OperationalError('disk full')):
+            self.app.record_watch('PROTECTION_QUOTE',quote={'price':100})
+        self.assertIn('LOCAL_RECORDING_WRITE_FAILED',self.app.watch_error)
+        self.app.record_watch('HEARTBEAT',trading=False)
+        self.assertIsNone(self.app.watch_error)
+
+    def test_monitor_heartbeat_is_durable_and_has_no_account_or_credentials(self):
+        from monitoring import status
+        self.app.record_watch('HEARTBEAT',oi_active=True,oi_at='2026-11-18T12:00:00+09:00')
+        value=status(self.app.state)
+        self.assertTrue(value['oi_active'])
+        self.assertEqual(value['session'],self.app.watch_session)
+        with self.app.db() as db:
+            rows=[r[0] for r in db.execute('SELECT payload FROM watch_events')]
+        for text in rows:
+            self.assertNotIn('app_secret',text);self.assertNotIn('CANO',text);self.assertNotIn('Bearer',text)
 
 if __name__=='__main__':unittest.main()

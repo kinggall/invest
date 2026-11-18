@@ -187,6 +187,9 @@ class OIService:
         self.db=sqlite3.connect(path,timeout=10,isolation_level=None);self.db.row_factory=sqlite3.Row
         self.db.execute('CREATE TABLE IF NOT EXISTS oi_snapshots (id INTEGER PRIMARY KEY,observed_at TEXT,expiry TEXT,payload TEXT)')
         self.db.execute('CREATE INDEX IF NOT EXISTS oi_expiry_time ON oi_snapshots(expiry,observed_at)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS oi_quotes (id INTEGER PRIMARY KEY,stamp TEXT,expiry TEXT,side TEXT,strike REAL,payload TEXT)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS oi_quote_time ON oi_quotes(stamp)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS oi_board_samples (id INTEGER PRIMARY KEY,stamp TEXT,expiry TEXT,payload TEXT)')
         path.chmod(0o600)
 
     def close(self):self.db.close()
@@ -254,6 +257,7 @@ class OIService:
             data=self.query(OI_OPTIONS,dict(FID_COND_MRKT_DIV_CODE='O',FID_COND_SCR_DIV_CODE='20503',FID_MRKT_CLS_CODE='CO',
                 FID_MTRT_CNT=expiry,FID_MRKT_CLS_CODE1='PO',FID_COND_MRKT_CLS_CODE=''))
             calls,skip_call=chain(data.get('output1'),'call');puts,skip_put=chain(data.get('output2'),'put')
+            self.db.execute('INSERT INTO oi_board_samples(stamp,expiry,payload) VALUES (?,?,?)',(now.isoformat(),expiry,json.dumps(dict(calls=calls,puts=puts),ensure_ascii=False)))
             if not calls or not puts:raise TradingError('콜·풋 OI 자료가 부족합니다. 실전 조회 권한과 선택 만기를 확인하세요.')
             board_at=(now if fixed else datetime.now(KST)).isoformat()
             for row in calls+puts:row['received_at']=board_at
@@ -332,9 +336,11 @@ class OIService:
                         parsed,skipped=chain([fields],contract['side'])
                         if not parsed:raise TradingError('OI_QUOTE_MISSING')
                         parsed[0]['received_at']=(now if fixed else datetime.now(KST)).isoformat()
+                        self.db.execute('INSERT INTO oi_quotes(stamp,expiry,side,strike,payload) VALUES (?,?,?,?,?)',(parsed[0]['received_at'],expiry,contract['side'],contract['strike'],json.dumps(parsed[0],ensure_ascii=False)))
                         collected[(contract['side'],contract['strike'])]=parsed[0]
                         individual_count+=1;consecutive=0
-                    except TradingError:
+                    except TradingError as exc:
+                        self.db.execute('INSERT INTO oi_quotes(stamp,expiry,side,strike,payload) VALUES (?,?,?,?,?)',((now if fixed else datetime.now(KST)).isoformat(),expiry,contract['side'],contract['strike'],json.dumps(dict(status='ERROR',code=contract['code'],reason=str(exc)),ensure_ascii=False)))
                         failures+=1;consecutive+=1
                         if consecutive>=3:break
                 calls=sorted([r for r in collected.values() if r['side']=='call'],key=lambda r:r['strike'])

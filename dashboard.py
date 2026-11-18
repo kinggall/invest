@@ -24,6 +24,7 @@ from wall_broker import WallBroker
 from wall_replay import replay, available_dates, ensure_observations, capture
 from signals import macd
 from history import History
+from monitoring import append as watch_append, ensure as watch_ensure, status as watch_status
 from price_archive import archive, latest as archive_latest
 from backtest import simulate, STRATEGIES
 from oi import OIService, settings as oi_settings
@@ -35,7 +36,7 @@ API_VERSION = '2026-11-demo2'
 def source_fingerprint():
     root=Path(__file__).resolve().parent
     digest=hashlib.sha256()
-    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py','price_archive.py'):
+    for name in ('dashboard.py','signals.py','history.py','market.py','macd_strategy.py','backtest.py','trader.py','risk.py','oi.py','instruments.py','confirmation.py','futures_chart.py','wall_paper.py','wall_replay.py','wall_broker.py','price_archive.py','monitoring.py'):
         digest.update((root/name).read_bytes())
     return digest.hexdigest()
 
@@ -43,6 +44,8 @@ def source_fingerprint():
 class Dashboard:
     def __init__(self, home, state):
         self.home, self.state = Path(home), Path(state)
+        self.watch_session=secrets.token_hex(12)
+        self.watch_error=None
         self.source_fingerprint=source_fingerprint()
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
@@ -86,6 +89,7 @@ class Dashboard:
         self.csrf = secrets.token_urlsafe(32)
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT)')
+            watch_ensure(db)
             db.execute('CREATE TABLE IF NOT EXISTS confirmation_samples (id TEXT PRIMARY KEY, stamp TEXT, payload TEXT)')
             db.execute('INSERT OR IGNORE INTO settings VALUES (1, ?)', (json.dumps(DEFAULT),))
         with self.db() as db:
@@ -101,6 +105,28 @@ class Dashboard:
         paper=WallPaper(self.state);ensure_observations(paper.db);paper.close()
         self.replay_dates=available_dates(self.state)
         self.state.chmod(0o600)
+        with self.db() as db:
+            recording=db.execute("SELECT value FROM watch_settings WHERE name='oi_recording'").fetchone()
+        self.oi_active=bool(recording and json.loads(recording[0]))
+        self.record_watch('SERVER_START',build=self.source_fingerprint[:12],oi_active=self.oi_active)
+
+    def record_watch(self,kind,**fields):
+        try:
+            watch_append(self.state,kind,dict(session=self.watch_session,**fields))
+            self.watch_error=None
+        except (OSError,sqlite3.Error):self.watch_error='LOCAL_RECORDING_WRITE_FAILED: 로컬 감시 기록 저장 실패 · 디스크/DB를 확인하세요.'
+
+    def save_recording_flag(self):
+        with self.db() as db:db.execute("INSERT OR REPLACE INTO watch_settings VALUES ('oi_recording',?)",(json.dumps(self.oi_active),))
+
+    def watch_worker(self):
+        while not self.shutdown.is_set():
+            try:
+                self.record_watch('HEARTBEAT',trading=self.wall_enabled,exit_requested=self.wall_exit_requested,
+                    protection=dict(self.protection_health),oi_active=self.oi_active,oi_job=dict(self.oi_job),
+                    oi_at=(self.oi_snapshot or {}).get('observed_at'),last_evaluation=self.last_check,build=self.source_fingerprint[:12])
+            except Exception as exc:self.record_demo_error('감시 기록 저장',exc)
+            if self.shutdown.wait(30):break
 
     @contextmanager
     def db(self):
@@ -154,6 +180,7 @@ class Dashboard:
         clock=datetime.now(KST)
         if clock.weekday()<5 and (clock.hour,clock.minute)>=(15,15):return
         if source_fingerprint()!=self.source_fingerprint:
+            self.record_watch('STRATEGY_BLOCKED',reason='SOURCE_CHANGED')
             with self.lock:
                 self.wall_message='코드 갱신 감지 · 신규 진입 차단, 독립 보유 감시·청산 유지 · 서버 재시작 필요'
             return
@@ -170,6 +197,7 @@ class Dashboard:
                 # Stop is checked again after network I/O. A stopped simulator fills nothing.
                 if not self.wall_enabled and not self.wall_exit_requested:return
                 if source_fingerprint()!=self.source_fingerprint:
+                    self.record_watch('STRATEGY_BLOCKED',reason='SOURCE_CHANGED')
                     self.wall_message='코드 갱신 감지 · 신규 진입 차단, 독립 보유 감시·청산 유지 · 서버 재시작 필요';return
                 observed=datetime.now(KST)
                 with self.db() as records:
@@ -177,7 +205,9 @@ class Dashboard:
                 if quote:self.replay_dates=sorted(set(self.replay_dates+[observed.date().isoformat()]),reverse=True)[:90]
                 exit_now=self.wall_exit_requested;oi_now=self.oi_snapshot
             with self.execution_lock:
+                self.record_watch('STRATEGY_INPUT',evaluated_at=observed.isoformat(),quote=quote,confirmation=assess(snapshot,oi_now,observed),oi_at=(oi_now or {}).get('observed_at'))
                 result=paper.step(snapshot,oi_now,quote,now=observed,force_exit=exit_now,may_submit=self.demo_submission_allowed)
+            self.record_watch('STRATEGY_RESULT',evaluated_at=observed.isoformat(),status=result['state']['status'],message=result['state']['message'],quantity=result['quantity'],pending=result.get('pending_count'))
             with self.lock:
                 if self.wall_enabled or self.wall_exit_requested:self.wall_message=result['state']['message']
                 if self.wall_exit_requested and not result['quantity'] and not result.get('pending_count'):
@@ -193,7 +223,7 @@ class Dashboard:
                 token = '기존 domino에서 모의 토큰 갱신 필요'
             account = bool(__import__('re').fullmatch(r'\d{8}', os.environ.get('KIS_DEMO_CANO','')))
             orders=[];signals=[] # Historical broker ledger is retained, not part of this page.
-            return dict(price_archive=archive_latest(self.state),replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
+            return dict(recording=watch_status(self.state),recording_error=self.watch_error,price_archive=archive_latest(self.state),replay_result=self.replay_result,replay_job=dict(self.replay_job),replay_dates=self.replay_dates,wall_paper=self.wall_status(),future_context=session_at(datetime.now(KST)),future_snapshot=self.future_snapshot,future_job=dict(self.future_job),confirmation=assess(self.snapshot,self.oi_snapshot),api_version=API_VERSION,build_id=self.source_fingerprint[:12],restart_required=source_fingerprint()!=self.source_fingerprint,oi_active=self.oi_active,oi_snapshot=self.oi_snapshot,oi_job=dict(self.oi_job),oi_config=self.oi_config,enabled=self.enabled,risk_active=self.risk_active,risk_snapshot=self.risk_snapshot, token=token, account_ready=account, strategy=self.strategy(), orders=orders, signals=signals, snapshot=self.snapshot, history=self.history, backtest=self.backtest, lookup_job=dict(self.lookup_job),
                         last_message=self.last_message, last_check=self.last_check, csrf=self.csrf)
 
     def record_confirmation(self):
@@ -209,6 +239,7 @@ class Dashboard:
     def tick(self, execute):
         with self.lock:
             cfg=self.strategy()
+        if self.wall_enabled or self.day_exit_armed:self.record_watch('STRATEGY_STARTED',last_evaluation=self.last_check)
         engine = self.engine()
         try:
             result = engine.evaluate(cfg,False,observe_only=True)
@@ -239,6 +270,7 @@ class Dashboard:
 
     def run_oi(self,cfg):
         service=None
+        self.record_watch('OI_STARTED',config=cfg)
         try:
             with self.oi_lock:
                 service=OIService(self.home,self.state,progress=self.oi_progress)
@@ -253,13 +285,14 @@ class Dashboard:
                     message=('OI 전체 새 수신 · 유효 '+str(sampling['fresh'])+'/'+str(sampling['total'])+'종목' if sampling.get('mode')=='full' else 'OI 조회 완료')
                     if partial:message+=' · 일부 수신, 임시 후보'
                     self.oi_job=dict(state='succeeded',message=message+(' · 60초 이내 저장 자료' if snapshot.get('cached') else ' · 관측 자료 저장됨'))
+                self.record_watch('OI_SAVED',observed_at=snapshot.get('observed_at'),expiry=snapshot.get('expiry'),put_wall=snapshot.get('put_wall'),call_wall=snapshot.get('call_wall'),sampling=snapshot.get('sampling'),coverage_complete=snapshot.get('coverage_complete'))
                 self.record_confirmation()
         except Exception as exc:
+            self.record_watch('OI_ERROR',message=self.lookup_error(exc),config=cfg)
             with self.lock:
-                if not is_rate_limit(exc):self.oi_active=False
                 self.oi_snapshot=None
                 self.last_oi=time.monotonic()
-                self.oi_job=dict(state='failed',message=self.lookup_error(exc))
+                self.oi_job=dict(state='failed',message=self.lookup_error(exc)+' · 자동 기록 요청은 유지, 60초 후 재시도')
         finally:
             if service is not None:service.close()
 
@@ -268,6 +301,8 @@ class Dashboard:
         if self.oi_job['state']=='running':raise TradingError('OI 조회가 진행 중입니다. 진행 상태를 확인하세요.')
         if self.oi_active and cfg!=self.oi_config:raise TradingError('OI 기록을 중지한 뒤 만기·범위를 변경하세요.')
         self.oi_config=cfg;self.oi_active=auto or self.oi_active
+        with self.db() as db:db.execute('INSERT OR REPLACE INTO settings(id,value) VALUES (3,?)',(json.dumps(cfg),))
+        self.save_recording_flag()
         self.oi_job=dict(state='running',message='실전 읽기 전용 OI 조회 준비 중…')
         self.oi_thread=threading.Thread(target=self.run_oi,args=(cfg,),daemon=True)
         self.oi_thread.start()
@@ -414,6 +449,7 @@ class Dashboard:
                 engine.db.close()
 
     def action(self, command, value):
+        if command in ('wall_start','wall_stop','wall_close','oi_start','oi_stop'):self.record_watch('CONTROL',command=command)
         with self.lock:
             if command=='wall_sync':
                 if self.account_job['state']=='running':raise TradingError('모의계좌 조회가 진행 중입니다.')
@@ -426,6 +462,8 @@ class Dashboard:
                 self.request_future()
             elif command=='oi_stop':
                 self.oi_active=False
+                self.save_recording_flag()
+                self.record_watch('OI_STOPPED')
                 self.oi_job['message']='OI 자동 기록 중지 · 진행 중인 조회는 완료될 수 있습니다.'
             elif command=='replay':
                 if self.replay_job['state']=='running':raise TradingError('저장 자료 재생이 진행 중입니다.')
@@ -442,6 +480,7 @@ class Dashboard:
                 if not self.oi_active:
                     if self.oi_job['state']=='running':self.oi_active=True
                     else:self.request_oi(self.oi_config,True)
+                self.save_recording_flag()
                 self.wall_enabled=True;self.day_exit_armed=True;self.wall_exit_requested=False
                 self.protection_health.update(state='STARTING',last_attempt=datetime.now(KST).isoformat(),error=None)
                 self.wall_message='한투 모의매매 시작 · OI/ETF 자료 준비 후 신호에 따라 모의주문 전송'
@@ -493,6 +532,8 @@ class Dashboard:
 
     def record_demo_error(self,stage,exc):
         message=self.lookup_error(exc)
+        try:self.record_watch('ERROR',stage=stage,message=message)
+        except Exception:pass
         try:
             broker=WallBroker(self.state)
             try:broker.record_error(stage,message)
@@ -552,6 +593,7 @@ class Dashboard:
             self.sync_demo() # Existing orders can still be polled read-only.
             return
         with self.lock:self.protection_health.update(last_attempt=now.isoformat())
+        if now.weekday()<5 and (9,0)<=(now.hour,now.minute)<(15,20):self.record_watch('PROTECTION_STARTED',manual=self.wall_exit_requested)
         if now.weekday()>=5 or not (9,0)<=(now.hour,now.minute)<(15,15):
             self.sync_demo()
             with self.lock:self.protection_health.update(state='CLOSING' if (15,15)<=(now.hour,now.minute)<(15,20) else 'CLOSED',error=None)
@@ -567,6 +609,7 @@ class Dashboard:
             price=client.quote(SYMBOL)
             quote=dict(symbol=SYMBOL,price=price,observed_at=datetime.now(KST).isoformat())
             p=view['state']['position']
+            self.record_watch('PROTECTION_QUOTE',quote=quote,quantity=view['quantity'],stop_price=p.get('stop_price'),put_stop=p.get('put_stop'),fixed_put=p.get('put'),fixed_call=p.get('call'))
             if not WallBroker.protection_reason(p,quote,{},datetime.now(KST)) and not self.wall_exit_requested:
                 try:
                     reader=ReadOnlyDerivativesClient(self.home)
@@ -584,6 +627,7 @@ class Dashboard:
                     quote=dict(symbol=SYMBOL,price=client.quote(SYMBOL),observed_at=datetime.now(KST).isoformat())
                 result=broker.step({}, {}, quote,now=datetime.now(KST),force_exit=self.wall_exit_requested,
                     protect_only=True,index=index,may_submit=self.exit_submission_allowed)
+            self.record_watch('PROTECTION_RESULT',quote=quote,index=index,index_error=index_error,status=result['state']['status'],message=result['state']['message'],quantity=result['quantity'],pending=result['pending_count'],oi_at=(self.oi_snapshot or {}).get('observed_at'))
             with self.lock:
                 self.wall_message=result['state']['message']
                 self.protection_health.update(state='DEGRADED' if index_error else 'RUNNING',last_success=datetime.now(KST).isoformat(),
@@ -697,7 +741,14 @@ def main():
     threading.Thread(target=app.worker, daemon=True).start()
     threading.Thread(target=app.protection_worker, daemon=True).start()
     threading.Thread(target=app.archive_worker, daemon=True).start()
+    threading.Thread(target=app.watch_worker, daemon=True).start()
 
+    with app.db() as records:
+        configured=records.execute("SELECT 1 FROM watch_settings WHERE name='oi_recording'").fetchone()
+    if not configured:
+        app.oi_active=True
+        app.save_recording_flag()
+        app.record_watch('OI_AUTOSTART')
     threading.Thread(target=app.oi_worker, daemon=True).start()
     threading.Thread(target=app.future_worker, daemon=True).start()
     url = 'http://127.0.0.1:' + str(server.server_port)
@@ -709,6 +760,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        app.record_watch('SERVER_STOP')
         app.shutdown.set()
         server.server_close()
 
