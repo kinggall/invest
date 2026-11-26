@@ -62,3 +62,34 @@ class ArchiveTests(unittest.TestCase):
         script=(root/'schedule-price-archive.ps1').read_text()
         for text in ('$slot -lt 30','15:35','15:50','16:10','-StartWhenAvailable','-AtLogOn','-MultipleInstances IgnoreNew','--domino-home','--state'):
             self.assertIn(text,script)
+
+    def test_explicit_four_day_recovery_includes_monday_and_returns_all_days(self):
+        from price_archive import recovery_dates
+        now=datetime(2026,11,26,18,tzinfo=KST)
+        dates=recovery_dates('2026-11-23','2026-11-26',now)
+        result=archive(self.path,Path(self.temp.name),now=now,client=self.source,dates=dates,force=True)
+        self.assertEqual([r['day'] for r in result],['2026-11-26','2026-11-25','2026-11-24','2026-11-23'])
+        self.assertTrue(all(r['status']=='COMPLETE' and r['saved']==380 for r in result))
+        self.assertEqual({call[2]['FID_INPUT_DATE_1'] for call in self.source.calls},{'20261123','20261124','20261125','20261126'})
+        db=sqlite3.connect(self.path)
+        self.assertTrue(db.execute("SELECT 1 FROM minutes WHERE stamp='2026-11-23T09:00:00+09:00'").fetchone());db.close()
+
+    def test_one_unavailable_day_does_not_abandon_other_recovery_dates(self):
+        from price_archive import recovery_dates
+        now=datetime(2026,11,26,18,tzinfo=KST);original=self.source.request
+        def query(path,tr,params,post=False):
+            if params.get('FID_INPUT_DATE_1')=='20261124':raise TradingError('HISTORY_QUERY_REJECTED / CODE=OPSQ0008')
+            return original(path,tr,params,post)
+        self.source.request=query
+        result=archive(self.path,Path(self.temp.name),now=now,client=self.source,dates=recovery_dates('2026-11-23','2026-11-26',now),force=True)
+        by_date={r['day']:r for r in result}
+        self.assertEqual(by_date['2026-11-24']['status'],'ERROR')
+        self.assertEqual(by_date['2026-11-24']['missing'],380)
+        self.assertEqual(by_date['2026-11-23']['status'],'COMPLETE')
+        self.assertEqual(by_date['2026-11-26']['status'],'COMPLETE')
+
+    def test_recovery_range_validation(self):
+        from price_archive import recovery_dates
+        now=datetime(2026,11,26,18,tzinfo=KST)
+        for start,end in [('2026-11-27','2026-11-27'),('2026-11-26','2026-11-23'),('2026-10-01','2026-11-26'),('bad','2026-11-26')]:
+            with self.assertRaises(TradingError):recovery_dates(start,end,now)
