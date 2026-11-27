@@ -238,3 +238,19 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result['position']['put'],800);self.assertEqual(result['position']['call'],820)
         self.assertFalse(self.book.options['call_breakout_entry'])
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)
+
+
+    def test_partial_oi_cross_is_retained_and_reported_in_breakout_diagnostics(self):
+        for offset,spot,call in [(0,798,800),(1,801,820),(3,802,830)]:
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now,spot=spot)
+            oi['call_wall']['strike']=call;oi['coverage_complete']=offset!=1
+            if offset:oi['put_wall']['strike']=800
+            etf['chart'][-2]['histogram']=3
+            etf['chart'][-1].update(histogram=2,macd=5,signal=3)
+            capture(self.book.db,etf,oi,quote,now)
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(call_breakout_entry=True))
+        self.assertEqual(result['buy_count'],1)
+        self.assertEqual(result['breakout_diagnostics'][0]['status'],'CALL_BREAKOUT_ARMED')
+        self.assertFalse(result['breakout_diagnostics'][0]['coverage_complete'])
+        self.assertEqual(result['breakout_diagnostics'][-1]['status'],'ENTERED')
+        self.assertIn('decision_reasons',result)

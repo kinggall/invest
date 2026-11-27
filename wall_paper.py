@@ -118,15 +118,16 @@ class WallPaper:
         """Causal flat-only breakout entry; default disabled, never live options."""
         spot=oi.get('spot');call=oi.get('call_wall') or {};expiry=oi.get('expiry')
         observed=oi.get('observed_at');wall_age=age(call.get('received_at'),now)
-        valid=(not oi.get('archived') and oi.get('coverage_complete') is True and fresh(observed,now,150)
+        observed_ok=(not oi.get('archived') and fresh(observed,now,150)
             and numeric(spot) and spot>0 and isinstance(expiry,str))
+        valid=observed_ok and oi.get('coverage_complete') is True
         usable_call=(valid and numeric(call.get('strike')) and call['strike']>spot and numeric(call.get('oi')) and call['oi']>0
             and wall_age is not None and 0<=wall_age<=(180 if oi.get('row_fresh_seconds')==180 else 600))
         reference=s.get('call_reference');armed=s.get('breakout_armed')
-        if reference and reference['expiry']!=expiry and valid:
+        if reference and reference['expiry']!=expiry and observed_ok:
             reference=None;s['call_reference']=None
         source_key=expiry+':'+str(reference['level'])+':'+str(observed) if reference and isinstance(expiry,str) else None
-        crossed=(valid and reference and source_key!=s.get('breakout_seen') and observed!=reference['observed_at'] and fresh(reference['observed_at'],now,180)
+        crossed=(observed_ok and reference and source_key!=s.get('breakout_seen') and observed!=reference['observed_at'] and fresh(reference['observed_at'],now,180)
             and reference['spot']<=reference['level']<spot)
         # Update the next reference, but never move an already-armed support/target.
         if usable_call and (not reference or observed!=reference['observed_at']):
@@ -134,16 +135,17 @@ class WallPaper:
         if not armed and crossed:
             end=(now.replace(minute=now.minute//3*3,second=0,microsecond=0)+timedelta(minutes=3)).isoformat()
             armed=dict(level=reference['level'],expiry=expiry,at=now.isoformat(),reference_at=reference['observed_at'],
-                trigger_at=observed,confirm_end=end,next_call=call['strike'] if usable_call else None)
+                trigger_at=observed,trigger_coverage_complete=valid,confirm_end=end,next_call=call['strike'] if usable_call else None)
             s['breakout_armed']=armed;s['breakout_seen']=source_key;s['armed']=None
             return 'CALL_BREAKOUT_ARMED','기존 콜월 돌파 관측 · 고정 벽 위에서 다음 확정 3분봉 확인 대기'
         if not armed:return None
         end=armed['confirm_end'];deadline=datetime.fromisoformat(end)+timedelta(seconds=RULES['call_breakout_confirm_seconds'])
         if now>=deadline:
             s['breakout_armed']=None;return 'CALL_BREAKOUT_EXPIRED','돌파 다음 확정봉 확인 시간 만료'
-        if valid and (expiry!=armed['expiry'] or spot<=armed['level']):
+        if observed_ok and (expiry!=armed['expiry'] or spot<=armed['level']):
             s['breakout_armed']=None;return 'CALL_BREAKOUT_CANCELLED','확인 전 월물 변경 또는 돌파한 콜월 재이탈'
         if not valid:return 'CALL_BREAKOUT_DATA_WAIT','돌파 후보 유지 · 최신 전체 범위 OI/지수 확인 대기'
+        if not armed['next_call'] and usable_call:armed['next_call']=call['strike']
         bar=(etf.get('chart') or [{}])[-1]
         if bar.get('end')!=end or now<datetime.fromisoformat(end):return 'CALL_BREAKOUT_WAIT','돌파 당시 고정한 콜월 위 · 다음 확정 3분봉 대기'
         if not fresh(bar.get('end'),now,RULES['call_breakout_confirm_seconds']):return 'CALL_BREAKOUT_DATA_WAIT','돌파 확인 봉 지연'
@@ -166,7 +168,12 @@ class WallPaper:
         supportive=(bar['close']>bar['vwap'] and bar['vwap_change']>0
             and (not self.options['macd_filter'] or bar['macd']>bar['signal']))
         s['breakout_armed']=None
-        if not supportive:return 'CALL_BREAKOUT_REJECTED','돌파 지지 후 VWAP 위·VWAP 상승·MACD 상방 유지 미충족'
+        if not supportive:
+            failed=[]
+            if bar['close']<=bar['vwap']:failed.append('ETF 종가가 VWAP 이하')
+            if bar['vwap_change']<=0:failed.append('VWAP 상승 아님')
+            if self.options['macd_filter'] and bar['macd']<=bar['signal']:failed.append('MACD가 Signal 이하')
+            return 'CALL_BREAKOUT_REJECTED','돌파 확인 조건 미충족 · '+' / '.join(failed)
         if spot>=support+(resistance-support)*.6:return 'CALL_BREAKOUT_REJECTED','이미 첫 익절 위치를 넘어 추격 진입 보류'
         key=expiry+':'+str(support)
         if s['losses'].get(key,0)>=2:return 'PUT_HALTED','같은 돌파 벽에서 당일 손절 2회 · 재진입 중지'

@@ -154,13 +154,26 @@ def replay(database,date,cfg,capital=10000000,mode='auto',progress=None,options=
 def evaluate_frames(source,frames,parsed,capital,options,progress):
     date=parsed.isoformat()
     model=WallPaper(':memory:',options=options);model.reset(capital)
-    counts=Counter();curve=[];chart={};seen_periods=set();first=last=None;ready=0;manual=0;warnings=[];oi_times=set();flow_times=set();ready_first=ready_last=None
+    counts=Counter();decision_reasons=Counter();breakout_log=[];last_candidate=None;last_breakout_signature=None;curve=[];chart={};seen_periods=set();first=last=None;ready=0;manual=0;warnings=[];oi_times=set();flow_times=set();ready_first=ready_last=None
     try:
         for i,frame in enumerate(frames):
             now=datetime.fromisoformat(frame['at']);etf=frame['etf'];oi=frame.get('oi') or {};quote=frame.get('quote') or {}
             if now.date()!=parsed:continue
             # No manual exit or live-ledger state is imported: this is a new strategy run.
             result=model.step(etf,oi,quote,now=now)
+            state=result['state'];status=state['status'];message=state['message']
+            decision_reasons[message]+=1
+            candidate=state.get('breakout_armed') or last_candidate
+            if status.startswith('CALL_BREAKOUT_') or status=='ENTERED' and (state.get('position') or {}).get('entry_kind')=='call_breakout':
+                signature=(status,message,(candidate or {}).get('level'))
+                if signature==last_breakout_signature and breakout_log:
+                    breakout_log[-1].update(last_at=now.isoformat(),count=breakout_log[-1]['count']+1)
+                else:
+                    breakout_log.append(dict(at=now.isoformat(),last_at=now.isoformat(),count=1,status=status,message=message,
+                        level=(candidate or {}).get('level'),confirm_end=(candidate or {}).get('confirm_end'),spot=oi.get('spot'),coverage_complete=oi.get('coverage_complete')))
+                last_breakout_signature=signature
+            else:last_breakout_signature=None
+            last_candidate=state.get('breakout_armed')
             counts[result['state']['status']]+=1;is_ready=model.confirmation(etf,oi,now)['status']!='WAITING' or result['state']['status']=='ENTERED';ready+=is_ready;manual+=bool(frame.get('manual'))
             if is_ready:ready_first=ready_first or now.isoformat();ready_last=now.isoformat()
             if oi.get('observed_at'):oi_times.add(oi['observed_at'])
@@ -192,7 +205,7 @@ def evaluate_frames(source,frames,parsed,capital,options,progress):
         if not ready:warnings.append('진입 판단에 필요한 자료가 동시에 충족된 표본이 없습니다. 거래 0건은 전략 성과의 증거가 아닙니다.')
         if result['quantity']:warnings.append('마지막 표본에도 미청산 보유가 있습니다. 마지막 관측 가격으로 평가했으며 임의로 장 마감 청산하지 않았습니다.')
         if first[11:16]>market_stamp(parsed,9).strftime('%H:%M') or last[11:16]<market_stamp(parsed,15,15).strftime('%H:%M'):warnings.append('전 거래시간을 포함하지 않는 기록입니다. 표시된 첫/마지막 표본 구간만 평가했습니다.')
-        return dict(date=date,mode=source['mode'],supplemented_samples=source.get('supplemented_samples',0),recorded_samples=source.get('recorded_samples',len(frames) if source['mode']=='recorded' else 0),symbol=TRADE_SYMBOL,capital=capital,first=first,last=last,samples=len(curve),ready_samples=ready,status_counts=dict(counts),
+        return dict(date=date,mode=source['mode'],supplemented_samples=source.get('supplemented_samples',0),recorded_samples=source.get('recorded_samples',len(frames) if source['mode']=='recorded' else 0),symbol=TRADE_SYMBOL,capital=capital,first=first,last=last,samples=len(curve),ready_samples=ready,status_counts=dict(counts),decision_reasons=dict(decision_reasons),breakout_diagnostics=breakout_log,
             final_equity=result['equity'],net_pnl=result['net_pnl'],return_pct=result['net_pnl']/capital*100,realized=result['state']['realized'],unrealized=result['unrealized'],fees=result['state']['fees'],
             valuation_at=result['state'].get('mark_at'),oi_first=min(oi_times) if oi_times else None,oi_last=max(oi_times) if oi_times else None,flow_first=min(flow_times) if flow_times else None,flow_last=max(flow_times) if flow_times else None,ready_first=ready_first,ready_last=ready_last,
             ending_quantity=result['quantity'],position=result['state']['position'],max_drawdown_pct=drawdown,round_trips=len(completed),win_rate_pct=sum(t['pnl']>0 for t in completed)/len(completed)*100 if completed else None,

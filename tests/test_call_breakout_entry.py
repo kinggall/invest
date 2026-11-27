@@ -118,3 +118,27 @@ class BreakoutEntryTests(unittest.TestCase):
         value=self.step(at,spot=802,call=820)
         self.assertEqual(value['events'][0]['reason'],'CALL_BREAKOUT_ENTRY')
         self.assertEqual(value['events'][0]['confirmation']['call_breakout_entry']['bar_end'],'2026-11-16T10:33:00+09:00')
+
+
+    def test_partial_oi_at_cross_registers_candidate_but_cannot_buy_until_complete(self):
+        self.step(self.start)
+        crossing=self.start+timedelta(minutes=1)
+        armed=self.step(crossing,spot=801,call=820,complete=False)
+        self.assertEqual(armed['state']['status'],'CALL_BREAKOUT_ARMED')
+        self.assertFalse(armed['events'])
+        self.assertIsNone(armed['state']['breakout_armed']['next_call'])
+        self.assertFalse(armed['state']['breakout_armed']['trigger_coverage_complete'])
+        before_close=self.start+timedelta(minutes=2,seconds=30)
+        waiting=self.step(before_close,spot=802,call=820,complete=True)
+        self.assertEqual(waiting['state']['breakout_armed']['next_call'],820)
+        at=self.start+timedelta(minutes=3)
+        blocked=self.step(at,spot=802,call=830,complete=False)
+        self.assertFalse(blocked['events'])
+        bought=self.step(at+timedelta(seconds=10),spot=802,call=830,complete=True)
+        self.assertEqual(bought['events'][0]['reason'],'CALL_BREAKOUT_ENTRY')
+        self.assertEqual(bought['state']['position']['call'],820)
+
+    def test_unknown_previous_wall_cannot_arm_from_partial_oi(self):
+        self.step(self.start,complete=False)
+        value=self.step(self.start+timedelta(minutes=1),spot=801,call=820,complete=False)
+        self.assertIsNone(value['state']['breakout_armed']);self.assertFalse(value['events'])
