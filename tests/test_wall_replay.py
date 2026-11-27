@@ -219,3 +219,22 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result['ending_quantity'],0)
         self.assertFalse(self.book.options['etf_profit_take'])
         self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)
+
+
+    def test_flat_call_breakout_option_compares_same_frames_with_fixed_old_wall(self):
+        for offset,spot,call in [(0,798,800),(1,801,820),(3,802,830)]:
+            now=self.start+timedelta(minutes=offset);etf,oi,quote=self.frame(now,spot=spot)
+            oi['call_wall']['strike']=call
+            if offset:oi['put_wall']['strike']=800
+            etf['chart'][-2]['histogram']=3
+            etf['chart'][-1].update(histogram=2,macd=5,signal=3)
+            capture(self.book.db,etf,oi,quote,now)
+        before=hashlib.sha256(self.path.read_bytes()).hexdigest()
+        result=replay(self.path,'2026-11-16',DEFAULT,options=dict(call_breakout_entry=True))
+        self.assertEqual(result['comparison'][0]['samples'],result['comparison'][1]['samples'])
+        self.assertEqual(result['comparison'][0]['buy_count'],0)
+        self.assertEqual(result['buy_count'],1)
+        self.assertEqual(result['events'][0]['reason'],'CALL_BREAKOUT_ENTRY')
+        self.assertEqual(result['position']['put'],800);self.assertEqual(result['position']['call'],820)
+        self.assertFalse(self.book.options['call_breakout_entry'])
+        self.assertEqual(hashlib.sha256(self.path.read_bytes()).hexdigest(),before)

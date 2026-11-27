@@ -10,17 +10,17 @@ from instruments import TRADE_SYMBOL, ETF_FEE_BPS
 from trader import KST,TradingError,integer
 
 RULES=dict(touch_pct=.3,put_stop_pct=.3,etf_stop_pct=1,initial_pct=40,below_vwap_pct=20,add_pct=20,
-    target1_box_pct=60,target2_box_pct=80,sell_each_pct=30,breakout_failure_pct=.2,cooldown_minutes=15,max_put_stops=2,
+    target1_box_pct=60,target2_box_pct=80,sell_each_pct=30,call_breakout_initial_pct=20,call_breakout_stop_pct=.2,call_breakout_confirm_seconds=180,breakout_failure_pct=.2,cooldown_minutes=15,max_put_stops=2,
     fee_bps=ETF_FEE_BPS,slippage_bps=5,tax_bps=0,force_close='15:15',fill_model='신호 확정 후 수집한 ETF REST 현재가 · 불리한 5원 호가/수수료/슬리피지 · 호가 잔량/미체결 미재현')
 
-DEFAULT_OPTIONS=dict(macd_filter=True,vwap_sizing=True,rebound_bars=1,breakout_add=True,etf_profit_take=False)
+DEFAULT_OPTIONS=dict(macd_filter=True,vwap_sizing=True,rebound_bars=1,breakout_add=True,etf_profit_take=False,call_breakout_entry=False)
 
 
 def strategy_options(value=None):
     if value is None:return dict(DEFAULT_OPTIONS)
     if not isinstance(value,dict) or set(value)-set(DEFAULT_OPTIONS):raise TradingError('BACKTEST_OPTIONS_INVALID')
     result=dict(DEFAULT_OPTIONS,**value)
-    for name in ('macd_filter','vwap_sizing','breakout_add','etf_profit_take'):
+    for name in ('macd_filter','vwap_sizing','breakout_add','etf_profit_take','call_breakout_entry'):
         if not isinstance(result[name],bool):raise TradingError('BACKTEST_OPTION_'+name.upper())
     if type(result['rebound_bars']) is not int or result['rebound_bars'] not in (1,2,3):raise TradingError('BACKTEST_REBOUND_BARS_INVALID')
     return result
@@ -42,7 +42,7 @@ def average(position):
 def new_state(capital):
     capital=integer(capital,'PAPER_CAPITAL',100000)
     if capital>1000000000:raise TradingError('가상 자금은 10억원 이하로 설정하세요.')
-    return dict(run_id=uuid.uuid4().hex,capital=capital,cash=float(capital),position=None,armed=None,day=None,
+    return dict(run_id=uuid.uuid4().hex,capital=capital,cash=float(capital),position=None,armed=None,call_reference=None,breakout_armed=None,breakout_seen=None,day=None,
         cooldown_until=None,losses={},used_touch=None,last_price=None,fees=0,realized=0,status='STOPPED',message='시뮬레이션 중지 · 실제 주문 없음')
 
 
@@ -114,10 +114,76 @@ class WallPaper:
     def confirmation(self,etf,oi,now):
         return assess(etf,oi,now,require_macd=self.options['macd_filter'])
 
+    def trend_entry(self,s,etf,oi,quote,now,confirmation):
+        """Causal flat-only breakout entry; default disabled, never live options."""
+        spot=oi.get('spot');call=oi.get('call_wall') or {};expiry=oi.get('expiry')
+        observed=oi.get('observed_at');wall_age=age(call.get('received_at'),now)
+        valid=(not oi.get('archived') and oi.get('coverage_complete') is True and fresh(observed,now,150)
+            and numeric(spot) and spot>0 and isinstance(expiry,str))
+        usable_call=(valid and numeric(call.get('strike')) and call['strike']>spot and numeric(call.get('oi')) and call['oi']>0
+            and wall_age is not None and 0<=wall_age<=(180 if oi.get('row_fresh_seconds')==180 else 600))
+        reference=s.get('call_reference');armed=s.get('breakout_armed')
+        if reference and reference['expiry']!=expiry and valid:
+            reference=None;s['call_reference']=None
+        source_key=expiry+':'+str(reference['level'])+':'+str(observed) if reference and isinstance(expiry,str) else None
+        crossed=(valid and reference and source_key!=s.get('breakout_seen') and observed!=reference['observed_at'] and fresh(reference['observed_at'],now,180)
+            and reference['spot']<=reference['level']<spot)
+        # Update the next reference, but never move an already-armed support/target.
+        if usable_call and (not reference or observed!=reference['observed_at']):
+            s['call_reference']=dict(level=call['strike'],spot=spot,expiry=expiry,observed_at=observed,received_at=call['received_at'])
+        if not armed and crossed:
+            end=(now.replace(minute=now.minute//3*3,second=0,microsecond=0)+timedelta(minutes=3)).isoformat()
+            armed=dict(level=reference['level'],expiry=expiry,at=now.isoformat(),reference_at=reference['observed_at'],
+                trigger_at=observed,confirm_end=end,next_call=call['strike'] if usable_call else None)
+            s['breakout_armed']=armed;s['breakout_seen']=source_key;s['armed']=None
+            return 'CALL_BREAKOUT_ARMED','기존 콜월 돌파 관측 · 고정 벽 위에서 다음 확정 3분봉 확인 대기'
+        if not armed:return None
+        end=armed['confirm_end'];deadline=datetime.fromisoformat(end)+timedelta(seconds=RULES['call_breakout_confirm_seconds'])
+        if now>=deadline:
+            s['breakout_armed']=None;return 'CALL_BREAKOUT_EXPIRED','돌파 다음 확정봉 확인 시간 만료'
+        if valid and (expiry!=armed['expiry'] or spot<=armed['level']):
+            s['breakout_armed']=None;return 'CALL_BREAKOUT_CANCELLED','확인 전 월물 변경 또는 돌파한 콜월 재이탈'
+        if not valid:return 'CALL_BREAKOUT_DATA_WAIT','돌파 후보 유지 · 최신 전체 범위 OI/지수 확인 대기'
+        bar=(etf.get('chart') or [{}])[-1]
+        if bar.get('end')!=end or now<datetime.fromisoformat(end):return 'CALL_BREAKOUT_WAIT','돌파 당시 고정한 콜월 위 · 다음 확정 3분봉 대기'
+        if not fresh(bar.get('end'),now,RULES['call_breakout_confirm_seconds']):return 'CALL_BREAKOUT_DATA_WAIT','돌파 확인 봉 지연'
+        source_after=age(end,datetime.fromisoformat(observed))
+        if source_after is None or not 0<=source_after<RULES['call_breakout_confirm_seconds'] or observed==armed['trigger_at']:
+            return 'CALL_BREAKOUT_DATA_WAIT','확인 봉 마감 이후 새로 수신한 지수 필요 · 이전 관측 재사용 안 함'
+        if not armed['next_call'] and usable_call:armed['next_call']=call['strike']
+        resistance=armed['next_call'];support=armed['level']
+        if not resistance or resistance<=spot:return 'CALL_BREAKOUT_DATA_WAIT','고정 돌파 벽 위의 다음 콜월/목표 범위 확인 필요'
+        # A three-minute closed bar remains the newest one until its successor
+        # closes. This entry path intentionally does not inherit the old 90s gate.
+        points=etf.get('chart') or [];previous=points[-2] if len(points)>1 else {}
+        contiguous=bool(previous.get('end') and age(previous['end'],datetime.fromisoformat(end))==180)
+        vwap_valid=all(numeric(bar.get(k)) for k in ('vwap','vwap_change','close')) and bar.get('vwap',0)>0
+        warmed=etf.get('bars',0)>=etf.get('required_bars',35)
+        macd_valid=warmed and all(numeric(bar.get(k)) for k in ('macd','signal'))
+        if not contiguous or not vwap_valid or confirmation['flow'].get('state')=='UNKNOWN' or (self.options['macd_filter'] and not macd_valid):
+            return 'CALL_BREAKOUT_DATA_WAIT','돌파 확인 봉의 연속성·VWAP·MACD·수급 자료 확인 대기'
+        if not fresh(end,datetime.fromisoformat(quote['observed_at']),RULES['call_breakout_confirm_seconds']):return 'CALL_BREAKOUT_DATA_WAIT','신호 확정 이후 ETF 체결 가정 시세 필요'
+        supportive=(bar['close']>bar['vwap'] and bar['vwap_change']>0
+            and (not self.options['macd_filter'] or bar['macd']>bar['signal']))
+        s['breakout_armed']=None
+        if not supportive:return 'CALL_BREAKOUT_REJECTED','돌파 지지 후 VWAP 위·VWAP 상승·MACD 상방 유지 미충족'
+        if spot>=support+(resistance-support)*.6:return 'CALL_BREAKOUT_REJECTED','이미 첫 익절 위치를 넘어 추격 진입 보류'
+        key=expiry+':'+str(support)
+        if s['losses'].get(key,0)>=2:return 'PUT_HALTED','같은 돌파 벽에서 당일 손절 2회 · 재진입 중지'
+        amount=self.size(s,quote['price'],RULES['call_breakout_initial_pct']/100)
+        if not amount:return 'NO_BUDGET','가상 자금/정수 수량 부족'
+        p=dict(id=uuid.uuid4().hex,wall_selection=oi.get('wall_selection'),entry_kind='call_breakout',entry_day=now.date().isoformat(),expiry=expiry,
+            put=support,call=resistance,put_stop=support*(1-RULES['call_breakout_stop_pct']/100),target1=support+(resistance-support)*.6,target2=support+(resistance-support)*.8,
+            original_quantity=amount,lots=[],tp1=False,tp2=False,added=False,protected=False,stop_price=0,breakout_bar=None,breakout_count=0,armed_at=armed['at'])
+        confirmation['call_breakout_entry']=dict(armed,confirmed_at=observed,budget_pct=RULES['call_breakout_initial_pct'],bar_end=end,vwap=bar['vwap'],close=bar['close'],vwap_change=bar['vwap_change'],macd=bar.get('macd'),signal=bar.get('signal'),confirmation_seconds=RULES['call_breakout_confirm_seconds'])
+        self.event(s,p,'CALL_BREAKOUT_ENTRY','buy',amount,quote['price'],spot,now,confirmation)
+        s['position']=p;s['armed']=None
+        return 'ENTERED','무보유 콜월 돌파 첫 매수 · 예산 20% · 지지/다음 콜월 고정'
+
     def advance(self,s,etf,oi,quote,now,force_exit):
         def wait(status,message):s.update(status=status,message=message,updated_at=now.isoformat());return s
         day=now.date().isoformat();p=s['position'];q=quantity(p)
-        if s['day']!=day:s.update(day=day,armed=None,used_touch=None,losses={})
+        if s['day']!=day:s.update(day=day,armed=None,used_touch=None,losses={},call_reference=None,breakout_armed=None,breakout_seen=None)
         if now.weekday()>=5 or not market_time(now,9,0)<=(now.hour,now.minute)<market_time(now,15,20):
             return wait('CLOSED','장외 · 가상 보유 유지, 유효한 장중 시세까지 대기')
         live=(etf.get('symbol')==TRADE_SYMBOL and fresh(etf.get('price_time'),now,120) and numeric(quote.get('price')) and quote['price']>0
@@ -133,10 +199,10 @@ class WallPaper:
             elif p['entry_day']!=day:reason='OVERNIGHT_EXIT'
             elif (now.hour,now.minute)>=market_time(now,15,15):reason='DAY_EXIT'
             elif price<=p['stop_price']:reason='PROFIT_PROTECT' if p['protected'] and price>=average(p)*.99 else 'ETF_STOP'
-            elif spot is not None and spot<=p['put_stop']:reason='PUT_STOP'
+            elif spot is not None and spot<=p['put_stop']:reason='CALL_BREAKOUT_STOP' if p.get('entry_kind')=='call_breakout' else 'PUT_STOP'
             if reason:
                 self.event(s,p,reason,'sell',q,price,spot,now,confirmation)
-                if reason in ('ETF_STOP','PUT_STOP'):
+                if reason in ('ETF_STOP','PUT_STOP','CALL_BREAKOUT_STOP'):
                     key=p['expiry']+':'+str(p['put']);s['losses'][key]=s['losses'].get(key,0)+1
                     s['cooldown_until']=(now+timedelta(minutes=15)).isoformat()
                 s['position']=None;s['armed']=None
@@ -188,6 +254,9 @@ class WallPaper:
         if force_exit:return wait('FLAT','가상 보유 없음')
         if (now.hour,now.minute)>=market_time(now,15,15):return wait('ENTRY_CUTOFF',session_info(now)['liquidate']+' 이후 신규 진입 중지')
         if s['cooldown_until'] and datetime.fromisoformat(s['cooldown_until'])>now:return wait('COOLDOWN','손절/돌파 실패 후 15분 대기')
+        if self.options['call_breakout_entry']:
+            decision=self.trend_entry(s,etf,oi,quote,now,confirmation)
+            if decision:return wait(*decision)
         if confirmation['status']=='WAITING':return wait('DATA_WAIT',confirmation['message'])
         walls=confirmation['walls'];put=walls['put'];call=walls['call'];expiry=oi.get('expiry')
         if not isinstance(expiry,str):return wait('DATA_WAIT','옵션 만기 확인 필요')

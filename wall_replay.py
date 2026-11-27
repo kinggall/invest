@@ -161,7 +161,7 @@ def evaluate_frames(source,frames,parsed,capital,options,progress):
             if now.date()!=parsed:continue
             # No manual exit or live-ledger state is imported: this is a new strategy run.
             result=model.step(etf,oi,quote,now=now)
-            counts[result['state']['status']]+=1;is_ready=model.confirmation(etf,oi,now)['status']!='WAITING';ready+=is_ready;manual+=bool(frame.get('manual'))
+            counts[result['state']['status']]+=1;is_ready=model.confirmation(etf,oi,now)['status']!='WAITING' or result['state']['status']=='ENTERED';ready+=is_ready;manual+=bool(frame.get('manual'))
             if is_ready:ready_first=ready_first or now.isoformat();ready_last=now.isoformat()
             if oi.get('observed_at'):oi_times.add(oi['observed_at'])
             if (etf.get('flow') or {}).get('observed_at'):flow_times.add(etf['flow']['observed_at'])
